@@ -1,0 +1,42 @@
+groups:
+  - name: jarvis-core
+    rules:
+      - alert: JarvisCoreDown
+        expr: up{job="jarvis-core"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: J.A.R.V.I.S. core is unavailable
+
+      - alert: JarvisHighServerErrorRate
+        expr: |
+          sum(rate(jarvis_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(jarvis_http_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Server error rate is above 5 percent
+
+      - alert: JarvisHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(jarvis_http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: HTTP p95 latency is above 5 seconds
+
+      - alert: JarvisModelNotConfigured
+        expr: jarvis_llm_configured == 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: Model credentials are not configured

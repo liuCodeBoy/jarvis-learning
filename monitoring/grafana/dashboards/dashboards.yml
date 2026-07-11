@@ -1,0 +1,15 @@
+# Grafana仪表板自动加载配置
+apiVersion: 1
+
+providers:
+  - name: 'Jarvis Dashboards'
+    orgId: 1
+    folder: 'Jarvis'
+    folderUid: 'jarvis-folder'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: true

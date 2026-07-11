@@ -1,0 +1,106 @@
+services:
+  jarvis-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jarvis-learning:local
+    container_name: jarvis-core
+    user: "${JARVIS_UID:-1000}:${JARVIS_GID:-1000}"
+    environment:
+      JARVIS_DB_PATH: /app/data/jarvis_learning.db
+      JARVIS_BACKUP_DIR: /app/backups
+      JARVIS_API_TOKEN: ${JARVIS_API_TOKEN:-}
+      JARVIS_PUBLIC_ORIGIN: ${JARVIS_PUBLIC_ORIGIN:-}
+      JARVIS_TRUSTED_PROXY_HOPS: ${JARVIS_TRUSTED_PROXY_HOPS:-0}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      ANTHROPIC_TOTAL_TIMEOUT_SECONDS: ${ANTHROPIC_TOTAL_TIMEOUT_SECONDS:-95}
+      JARVIS_LEARNING_ENABLED: ${JARVIS_LEARNING_ENABLED:-false}
+      JARVIS_KNOWLEDGE_EXTRACTION_ENABLED: ${JARVIS_KNOWLEDGE_EXTRACTION_ENABLED:-false}
+      JARVIS_EVOLUTION_ENABLED: ${JARVIS_EVOLUTION_ENABLED:-false}
+      JARVIS_SKILL_MINING_ENABLED: ${JARVIS_SKILL_MINING_ENABLED:-false}
+    ports:
+      - "${JARVIS_BIND_HOST:-127.0.0.1}:${JARVIS_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+      - ./config.yaml:/app/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks: [jarvis-network]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: jarvis-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    networks: [jarvis-network]
+
+  prometheus-pushgateway:
+    image: prom/pushgateway:v1.9.0
+    container_name: jarvis-pushgateway
+    ports:
+      - "127.0.0.1:9091:9091"
+    restart: unless-stopped
+    networks: [jarvis-network]
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: jarvis-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-before-exposing}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    restart: unless-stopped
+    networks: [jarvis-network]
+
+  cron-scheduler:
+    image: jarvis-learning:local
+    container_name: jarvis-cron
+    user: "${JARVIS_UID:-1000}:${JARVIS_GID:-1000}"
+    command: ["python", "scripts/cron_jobs.py"]
+    environment:
+      JARVIS_CORE_URL: http://jarvis-core:8000
+      JARVIS_DB_PATH: /app/data/jarvis_learning.db
+      JARVIS_LOG_DIR: /app/logs
+      JARVIS_BACKUP_DIR: /app/backups
+      JARVIS_API_TOKEN: ${JARVIS_API_TOKEN:-}
+      PROMETHEUS_PUSHGATEWAY: http://prometheus-pushgateway:9091
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+    depends_on:
+      jarvis-core:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [jarvis-network]
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  jarvis-network:
+    driver: bridge

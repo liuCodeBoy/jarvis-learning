@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <title>J.A.R.V.I.S.</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body data-token-required="{{ 'true' if token_required else 'false' }}">
+    <div class="app-shell" id="app-shell">
+        <canvas id="face-canvas" aria-label="贾维斯全息人脸状态反馈"></canvas>
+        <div class="webgl-fallback" id="webgl-fallback" hidden>
+            <div class="fallback-face" aria-hidden="true">
+                <span class="fallback-eye fallback-eye-left"></span>
+                <span class="fallback-eye fallback-eye-right"></span>
+                <span class="fallback-mouth"></span>
+            </div>
+        </div>
+
+        <header class="topbar">
+            <div class="brand-lockup">
+                <span class="brand-mark">J</span>
+                <div>
+                    <h1>J.A.R.V.I.S.</h1>
+                    <p>COGNITIVE INTERFACE</p>
+                </div>
+            </div>
+            <div class="system-status" aria-live="polite">
+                <span class="status-light" id="status-light"></span>
+                <div>
+                    <strong id="status-label">待命</strong>
+                    <span id="model-label">{{ model_name }}</span>
+                </div>
+            </div>
+        </header>
+
+        <section class="face-readout" aria-live="polite">
+            <span class="readout-rule"></span>
+            <strong id="face-state-label">STANDBY</strong>
+            <span id="face-state-detail">SYSTEM READY</span>
+        </section>
+
+        <aside class="conversation-panel tool-panel" id="conversation-panel" aria-label="对话">
+            <header class="panel-header">
+                <div>
+                    <span class="panel-kicker">CHANNEL 01</span>
+                    <h2>对话</h2>
+                </div>
+                <button class="icon-button" id="clear-chat" type="button" title="新建会话" aria-label="新建会话">
+                    <i data-lucide="square-pen"></i>
+                </button>
+            </header>
+            <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+            <form class="composer" id="chat-form">
+                <label class="sr-only" for="user-input">消息</label>
+                <textarea id="user-input" rows="1" maxlength="8000" placeholder="输入消息" autocomplete="off"></textarea>
+                <div class="composer-actions">
+                    <button class="icon-button" id="mic-button" type="button" title="语音输入" aria-label="开始语音输入" aria-pressed="false">
+                        <i data-lucide="mic"></i>
+                    </button>
+                    <button class="icon-button" id="voice-button" type="button" title="语音播报" aria-label="切换语音播报" aria-pressed="false">
+                        <i data-lucide="volume-x"></i>
+                    </button>
+                    <button class="send-button" id="send-button" type="submit" title="发送" aria-label="发送消息">
+                        <i data-lucide="arrow-up"></i>
+                    </button>
+                </div>
+            </form>
+        </aside>
+
+        <aside class="workspace-panel tool-panel" id="workspace-panel" aria-label="工作区" hidden>
+            <header class="panel-header">
+                <div>
+                    <span class="panel-kicker" id="workspace-kicker">MODULE</span>
+                    <h2 id="workspace-title">学习</h2>
+                </div>
+                <button class="icon-button" id="close-workspace" type="button" title="关闭" aria-label="关闭工作区">
+                    <i data-lucide="x"></i>
+                </button>
+            </header>
+            <div class="workspace-content">
+                <section class="module-view" data-view="learn" hidden>
+                    <div class="module-command">
+                        <div>
+                            <span class="metric-label">SEQUENCE ENGINE</span>
+                            <strong>PrefixSpan</strong>
+                        </div>
+                        <button class="command-button" id="run-learning" type="button">
+                            <i data-lucide="play"></i><span>运行分析</span>
+                        </button>
+                    </div>
+                    <div class="result-list" id="learning-results"></div>
+                    <div class="analysis-output" id="learning-analysis" hidden></div>
+                </section>
+
+                <section class="module-view" data-view="evolve" hidden>
+                    <div class="metric-strip">
+                        <div><span class="metric-label">可用样本</span><strong id="evolution-cases">0</strong></div>
+                        <div><span class="metric-label">最佳适应度</span><strong id="evolution-best">--</strong></div>
+                    </div>
+                    <button class="command-button" id="refresh-evolution" type="button">
+                        <i data-lucide="refresh-cw"></i><span>刷新状态</span>
+                    </button>
+                    <div class="result-list" id="evolution-results"></div>
+                </section>
+
+                <section class="module-view" data-view="memory" hidden>
+                    <form class="data-form" id="memory-form">
+                        <label for="memory-key">记忆键</label>
+                        <input id="memory-key" maxlength="128" autocomplete="off">
+                        <label for="memory-value">内容</label>
+                        <textarea id="memory-value" rows="5" maxlength="20000"></textarea>
+                        <div class="form-actions">
+                            <button class="command-button" id="retrieve-memory" type="button">
+                                <i data-lucide="search"></i><span>检索</span>
+                            </button>
+                            <button class="command-button primary" type="submit">
+                                <i data-lucide="save"></i><span>存储</span>
+                            </button>
+                        </div>
+                    </form>
+                    <div class="analysis-output" id="memory-result" hidden></div>
+                </section>
+
+                <section class="module-view" data-view="database" hidden>
+                    <div class="table-wrap">
+                        <table>
+                            <thead><tr><th>表</th><th>记录</th><th>用途</th></tr></thead>
+                            <tbody id="database-results"></tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="module-view" data-view="skills" hidden>
+                    <div class="module-command">
+                        <div>
+                            <span class="metric-label">SKILL REGISTRY</span>
+                            <strong id="skill-count">0</strong>
+                        </div>
+                        <button class="command-button" id="mine-skills" type="button">
+                            <i data-lucide="sparkles"></i><span>挖掘技能</span>
+                        </button>
+                    </div>
+                    <div class="result-list" id="skills-results"></div>
+                </section>
+            </div>
+        </aside>
+
+        <div class="telemetry" aria-label="系统遥测">
+            <div><span>会话</span><strong id="session-stat">--</strong></div>
+            <div><span>交互</span><strong id="interaction-stat">--</strong></div>
+            <div><span>数据库</span><strong id="database-stat">--</strong></div>
+        </div>
+
+        <nav class="mode-tabs" aria-label="功能视图">
+            <button class="mode-tab active" type="button" data-mode="chat" aria-pressed="true" title="对话">
+                <i data-lucide="message-square"></i><span>对话</span>
+            </button>
+            <button class="mode-tab" type="button" data-mode="learn" aria-pressed="false" title="学习">
+                <i data-lucide="brain-circuit"></i><span>学习</span>
+            </button>
+            <button class="mode-tab" type="button" data-mode="evolve" aria-pressed="false" title="进化">
+                <i data-lucide="dna"></i><span>进化</span>
+            </button>
+            <button class="mode-tab" type="button" data-mode="memory" aria-pressed="false" title="记忆">
+                <i data-lucide="brain"></i><span>记忆</span>
+            </button>
+            <button class="mode-tab" type="button" data-mode="database" aria-pressed="false" title="数据库">
+                <i data-lucide="database"></i><span>数据</span>
+            </button>
+            <button class="mode-tab" type="button" data-mode="skills" aria-pressed="false" title="技能">
+                <i data-lucide="blocks"></i><span>技能</span>
+            </button>
+        </nav>
+
+        <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+    </div>
+
+    <dialog class="auth-dialog" id="auth-dialog">
+        <form method="dialog" id="auth-form">
+            <div class="dialog-icon"><i data-lucide="key-round"></i></div>
+            <h2>访问验证</h2>
+            <label for="api-token">访问令牌</label>
+            <input id="api-token" type="password" autocomplete="current-password" required>
+            <button class="command-button primary" value="confirm" type="submit">验证</button>
+        </form>
+    </dialog>
+
+    <script src="{{ url_for('static', filename='vendor/three/three.min.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='vendor/lucide/lucide.min.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/state-machine.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/jarvis-face.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/api-client.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</body>
+</html>

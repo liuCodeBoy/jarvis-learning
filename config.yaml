@@ -1,0 +1,21 @@
+# J.A.R.V.I.S. runtime feature switches.
+# Environment variables with matching names override these values.
+
+jarvis:
+  name: "J.A.R.V.I.S."
+  version: "4.1.0"
+
+learning:
+  # Background learning is opt-in because it performs additional model calls.
+  enabled: false
+
+  knowledge_extraction:
+    enabled: false
+
+  evolution:
+    enabled: false
+
+  # Manual mining remains available from the authenticated/local interface;
+  # newly mined Skills start disabled.
+  skill_mining:
+    enabled: false

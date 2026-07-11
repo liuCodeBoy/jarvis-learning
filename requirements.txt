@@ -1,0 +1,11 @@
+# J.A.R.V.I.S. production dependencies (Python 3.10+)
+
+# Web/API
+Flask>=3.0,<4
+gunicorn>=22,<24
+requests>=2.31,<3
+
+# Runtime configuration and monitoring
+PyYAML>=6.0,<7
+prometheus-client>=0.20,<1
+psutil>=5.9,<8

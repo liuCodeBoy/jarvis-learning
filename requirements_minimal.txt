@@ -1,0 +1,5 @@
+# Minimal local runtime dependencies (Python 3.10+)
+Flask>=3.0,<4
+requests>=2.31,<3
+PyYAML>=6.0,<7
+prometheus-client>=0.20,<1
