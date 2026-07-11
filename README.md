@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. 自学习助手
 
-基于 Flask、SQLite 和 Anthropic Messages API 的本地智能助手。系统包含分层记忆、行为模式学习、技能沉淀、受控本机工具和 Prompt 进化，并通过 Three.js 全息人脸反馈当前认知状态。
+基于 Flask、SQLite 和 Anthropic Messages API 的本地智能助手。系统包含分层记忆、行为模式学习、技能沉淀、受控本机工具和 Prompt 进化，并通过 Three.js 极简低多边形网格脸反馈当前认知状态。启用 Azure Speech 后，嘴型由与合成音频同源的 viseme 时间轴驱动。
 
 ## 界面状态
 
@@ -11,7 +11,7 @@
 | `idle` | 中性表情、自然眨眼和轻微视线跟随 |
 | `listening` | 眼睛张开、虹膜增强，麦克风音量驱动反馈 |
 | `thinking` | 视线上移、眉部收紧、扫描速度提高 |
-| `speaking` | 嘴唇和下颌随文本输出或语音播报运动 |
+| `speaking` | 播放器按音频时钟消费 22 类标准 viseme，驱动嘴部形状 |
 | `executing` | 专注表情，用于学习、检索和数据操作 |
 | `error` | 红色面部反馈并自动恢复待命 |
 
@@ -90,6 +90,36 @@ export JARVIS_SKILL_MINING_ENABLED=true
 读取 `config.local.yaml` 和 `~/.claude/settings.json` 的 `env` 字段，不要把本地
 配置提交到 Git。
 
+## 精确语音与口型
+
+浏览器 `SpeechSynthesisUtterance` 不提供音素或 viseme，只提供词/句边界，因此不能
+用于可靠的中文口型同步。本项目改为由后端调用 Azure Speech SDK，并在同一次请求中
+取得 PCM WAV 音频、22 类 viseme ID 和音频 offset；前端以 `AudioContext.currentTime`
+为唯一时钟调度嘴型。未配置服务时不会播放假同步动画。
+
+在被 Git 忽略的 `config.local.yaml` 中加入自己的 Azure Speech 资源信息：
+
+```yaml
+voice:
+  provider: "azure"
+  azure:
+    key: "your-azure-speech-key"
+    region: "your-resource-region"
+    voice: "zh-CN-YunxiNeural"
+```
+
+也可以使用环境变量：
+
+```bash
+export AZURE_SPEECH_KEY='your-azure-speech-key'
+export AZURE_SPEECH_REGION='your-resource-region'
+export AZURE_SPEECH_VOICE='zh-CN-YunxiNeural'
+```
+
+`ANTHROPIC_AUTH_TOKEN` 只能调用语言模型，不能代替 Azure Speech 凭据。修改后重启
+服务，`GET /api/status` 中的 `speech.available` 应为 `true`。完整选型依据见
+[语音口型与人脸方案](docs/voice-face-options.md)。
+
 ## Docker
 
 ```bash
@@ -131,6 +161,7 @@ jarvis_learning/
 ├── jarvis/
 │   ├── api/web_app.py          # Flask 应用工厂和 API
 │   ├── core/llm.py             # 模型客户端
+│   ├── voice/                  # 音频与 viseme 同源的 TTS 适配器
 │   ├── database/               # Schema 与数据访问
 │   ├── learning/               # 模式、技能和进化
 │   └── memory/                 # 分层记忆与对话桥接

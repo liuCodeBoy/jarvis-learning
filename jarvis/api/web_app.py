@@ -31,6 +31,11 @@ from jarvis.database.schema import LearningDatabaseSchema
 from jarvis.learning.skills import SkillMatcher, SkillStore
 from jarvis.memory.bridge import MemoryBridge, get_memory_bridge
 from jarvis.tools.local_commands import LocalCommandExecutor
+from jarvis.voice import (
+    AzureSpeechSynthesizer,
+    SpeechSynthesisError,
+    UnavailableSpeechSynthesizer,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +44,7 @@ DEFAULT_DB_PATH = PROJECT_DIR / "data" / "jarvis_learning.db"
 SESSION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 MAX_MESSAGE_LENGTH = 8_000
 MAX_MEMORY_VALUE_LENGTH = 20_000
+MAX_SPEECH_TEXT_LENGTH = 500
 
 
 try:
@@ -201,6 +207,45 @@ def _merge_config(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, A
         else:
             merged[key] = value
     return merged
+
+
+def _create_speech_synthesizer(project_config: Dict[str, Any]):
+    voice_config = project_config.get("voice", {})
+    if not isinstance(voice_config, dict):
+        voice_config = {}
+    provider = str(
+        os.environ.get("JARVIS_VOICE_PROVIDER")
+        or voice_config.get("provider")
+        or "azure"
+    ).strip().lower()
+    if provider != "azure":
+        return UnavailableSpeechSynthesizer(
+            provider or "disabled", "精确语音合成已停用"
+        )
+
+    azure_config = voice_config.get("azure", {})
+    if not isinstance(azure_config, dict):
+        azure_config = {}
+    return AzureSpeechSynthesizer(
+        subscription_key=(
+            os.environ.get("AZURE_SPEECH_KEY")
+            or os.environ.get("SPEECH_KEY")
+            or str(azure_config.get("key") or "")
+        ),
+        region=(
+            os.environ.get("AZURE_SPEECH_REGION")
+            or os.environ.get("SPEECH_REGION")
+            or str(azure_config.get("region") or "")
+        ),
+        voice=(
+            os.environ.get("AZURE_SPEECH_VOICE")
+            or str(azure_config.get("voice") or "zh-CN-YunxiNeural")
+        ),
+        endpoint=(
+            os.environ.get("AZURE_SPEECH_ENDPOINT")
+            or str(azure_config.get("endpoint") or "")
+        ),
+    )
 
 
 def _db_connect(path: Path) -> sqlite3.Connection:
@@ -486,7 +531,8 @@ def _process_chat(path: Path, session_id: str, user_namespace: str,
 
 
 def create_app(test_config: Optional[Dict[str, Any]] = None,
-               llm_client: Optional[LLMConfig] = None) -> Flask:
+               llm_client: Optional[LLMConfig] = None,
+               speech_synthesizer: Optional[Any] = None) -> Flask:
     project_config = _load_project_config()
     learning_config = project_config.get("learning", {})
     knowledge_config = learning_config.get("knowledge_extraction", {})
@@ -551,6 +597,11 @@ def create_app(test_config: Optional[Dict[str, Any]] = None,
     app.extensions["llm"] = client
     app.extensions["memory_bridge"] = get_memory_bridge(str(db_path), llm=client)
     app.extensions["local_command_executor"] = LocalCommandExecutor()
+    app.extensions["speech_synthesizer"] = (
+        speech_synthesizer
+        if speech_synthesizer is not None
+        else _create_speech_synthesizer(project_config)
+    )
     app.extensions["skill_store"] = skill_store
     app.extensions["skill_matcher"] = SkillMatcher(skill_store)
     app.extensions["rate_limiter"] = RateLimiter()
@@ -700,6 +751,7 @@ def register_routes(app: Flask) -> None:
                 "SELECT COUNT(*) FROM interactions"
             ).fetchone()[0]
         client = current_app.extensions["llm"]
+        speech = current_app.extensions["speech_synthesizer"]
         return _ok({
             "status": "running",
             "episodes": episode_count,
@@ -708,7 +760,54 @@ def register_routes(app: Flask) -> None:
             "model": getattr(client, "model", "unconfigured"),
             "llm_available": _llm_available(client),
             "learning_enabled": current_app.config["JARVIS_LEARNING_ENABLED"],
+            "speech": {
+                "available": bool(getattr(speech, "available", False)),
+                "provider": getattr(speech, "provider", "unavailable"),
+                "voice": getattr(speech, "voice", ""),
+                "reason": getattr(speech, "reason", ""),
+            },
         })
+
+    @app.post("/api/speech")
+    @rate_limited("speech", 60, 60)
+    def synthesize_speech():
+        data = _json_body()
+        session_id = _validate_session_id(data.get("session_id"))
+        path: Path = current_app.config["JARVIS_DB_PATH"]
+        if not session_id or not _session_exists(path, session_id):
+            return _error("invalid_session", "会话不存在", 401)
+
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return _error("invalid_speech_text", "语音文本不能为空", 400)
+        text = text.strip()
+        if len(text) > MAX_SPEECH_TEXT_LENGTH:
+            return _error(
+                "speech_text_too_long",
+                f"单段语音文本不能超过 {MAX_SPEECH_TEXT_LENGTH} 个字符",
+                400,
+            )
+
+        synthesizer = current_app.extensions["speech_synthesizer"]
+        if not getattr(synthesizer, "available", False):
+            return _error(
+                "speech_unavailable",
+                getattr(synthesizer, "reason", "精确语音合成尚未配置"),
+                503,
+            )
+        try:
+            result = synthesizer.synthesize(text)
+        except SpeechSynthesisError as error:
+            status_code = 503 if error.code in {
+                "speech_unavailable", "speech_sdk_missing"
+            } else 502
+            return _error(error.code, error.message, status_code)
+        except Exception:
+            logger.exception("Speech synthesis raised an exception")
+            return _error(
+                "speech_provider_failed", "语音服务请求失败，请稍后重试", 502
+            )
+        return _ok(result.as_payload())
 
     @app.post("/api/chat")
     @rate_limited("chat", 12, 60)

@@ -23,3 +23,9 @@ learning:
 tools:
   # Model file tools are restricted to this directory and its descendants.
   workspace_path: "~/Desktop"
+
+voice:
+  # Exact lip sync requires audio and viseme offsets from the same TTS request.
+  provider: "azure"
+  azure:
+    voice: "zh-CN-YunxiNeural"

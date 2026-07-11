@@ -26,6 +26,7 @@ def test_secret_scan_ignores_placeholders_and_redacts_real_secret(tmp_path):
     (project / "app.py").write_text(
         "import os\n"
         "api_key = os.getenv('ANTHROPIC_API_KEY')\n"
+        "self.auth_token = env_token or local_token or ''\n"
         f"client_secret = '{secret}'  # accidental credential\n",
         encoding="utf-8",
     )
@@ -52,6 +53,34 @@ def test_secret_scan_ignores_placeholders_and_redacts_real_secret(tmp_path):
     assert check["details"]["findings"][0]["kind"] == "Anthropic API key"
     assert secret not in serialized
     assert "fingerprint" in serialized
+
+
+def test_database_audit_retries_a_transient_read_only_open(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    database = project / "data" / "jarvis.db"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE item (id INTEGER PRIMARY KEY)")
+
+    real_connect = sqlite3.connect
+    attempts = 0
+
+    def flaky_connect(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("unable to open database file")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr("scripts.security_audit.sqlite3.connect", flaky_connect)
+    monkeypatch.setattr("scripts.security_audit.time.sleep", lambda _delay: None)
+    auditor = SecurityAuditor(project, db_path=database)
+
+    auditor.audit_database()
+
+    check = result_for(auditor, "database.integrity")
+    assert attempts == 2
+    assert check["status"] == "passed"
 
 
 def test_permission_audit_uses_group_and_other_write_masks(tmp_path):

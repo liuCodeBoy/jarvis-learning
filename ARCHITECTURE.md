@@ -7,7 +7,8 @@
 ```text
 Browser
   ├── explicit state machine
-  ├── Three.js holographic face
+  ├── Three.js low-poly mesh face
+  ├── Web Audio viseme scheduler
   ├── chat / learning / memory / skill views
   └── typed API client
              │ HTTP/JSON
@@ -16,6 +17,7 @@ Flask application factory
   ├── session and input boundary
   ├── chat orchestration
   ├── guarded local command executor
+  ├── speech synthesis adapter
   ├── memory namespace
   ├── skill matching
   ├── health / metrics / backup
@@ -24,6 +26,7 @@ Flask application factory
        ┌─────┴──────────────┐
        ▼                    ▼
 Anthropic-compatible LLM   SQLite (WAL + FTS5)
+Azure Speech (optional)
 ```
 
 系统是单节点、本地优先的应用。SQLite、进程内限流和后台线程均以单实例部署为基准；需要水平扩展时，应先把限流、任务锁、会话所有权和学习任务迁移到共享基础设施。
@@ -55,10 +58,10 @@ module action: any -> executing -> idle
 failure:       any -> error -> idle
 ```
 
-每次异步操作获得递增的 `operationId`。旧请求、旧 TTS 回调和旧定时器不能覆盖新操作状态。麦克风开启时，真实 RMS 音量输入驱动虹膜反馈；语音播报时，`speechSynthesis` 的开始和结束事件控制说话状态。
-系统启用 `prefers-reduced-motion` 时停止扫描、漂移、眨眼脉冲和合成嘴部循环，只保留离散状态与真实音量反馈。
+每次异步操作获得递增的 `operationId`。旧请求、旧 TTS 回调和旧定时器不能覆盖新操作状态。麦克风开启时，真实 RMS 音量输入驱动虹膜反馈；语音播报时，后端从同一次 Azure Speech 合成取得音频和 viseme offset，浏览器按 `AudioContext.currentTime` 调度口型。文本打字动画不再驱动嘴部。
+系统启用 `prefers-reduced-motion` 时停止漂移和眨眼脉冲；作为内容反馈的真实 viseme 和音量输入仍保留。
 
-`JarvisFace` 只暴露 `setState`、`setAudioLevel`、`setWorkspaceOpen`、`resize` 和 `destroy`，业务控制器不直接操作 Three.js Mesh。
+`JarvisFace` 只暴露 `setState`、`setAudioLevel`、`startSpeaking`、`setViseme`、`stopSpeaking`、`setWorkspaceOpen`、`resize` 和 `destroy`，业务控制器不直接操作 Three.js Mesh。头部、眼睛、眉部和嘴部均由组件在同一个局部坐标系中生成，不再加载扫描 GLB 或叠加基于未知模型坐标的嘴片。
 
 ## API 边界
 
@@ -76,6 +79,7 @@ failure:       any -> error -> idle
 
 - 新会话由 `POST /api/session` 生成 128 位随机 ID。
 - 消息、记忆键和值均有服务端长度限制。
+- `POST /api/speech` 要求有效会话，单段最多 500 字，并返回无编码延迟的 PCM WAV 与同源 viseme 时间轴。
 - API 错误使用对应的 4xx/5xx 状态，不把异常伪装成 HTTP 200。
 - 同一会话只允许一个模型请求在途；重叠请求返回 `409 session_busy`，避免多标签页基于同一旧历史重复付费调用。
 - 回环地址可不设令牌；所有非回环 API 都要求 `JARVIS_API_TOKEN`，避免 tokenless 本地服务遭 DNS rebinding。

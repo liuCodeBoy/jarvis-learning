@@ -875,9 +875,7 @@ th:nth-child(2) {
     }
 
     .face-readout {
-        top: 68px;
-        bottom: auto;
-        width: 200px;
+        display: none;
     }
 
     .mode-tabs {

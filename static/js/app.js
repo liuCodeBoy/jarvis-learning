@@ -7,6 +7,10 @@
     var sessionId = "";
     var requestPending = false;
     var voiceEnabled = window.localStorage.getItem("jarvis.voiceEnabled") === "true";
+    var voiceAvailable = false;
+    var voiceUnavailableReason = "精确语音合成尚未配置";
+    var speechAudioContext = null;
+    var activeSpeech = null;
     var recognition = null;
     var microphoneStream = null;
     var audioContext = null;
@@ -227,53 +231,33 @@
         if (!data.llm_available) {
             elements["model-label"].textContent = "MODEL OFFLINE";
         }
+        var speech = data.speech || {};
+        voiceAvailable = Boolean(speech.available);
+        voiceUnavailableReason = speech.reason || "精确语音合成尚未配置";
+        updateVoiceButton();
     }
 
     async function typeResponse(messageElement, text, operationId) {
         var body = messageElement.querySelector(".message-body");
         var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        if (face) {
-            face.startSpeaking(text, true);
-        }
         if (reduced || text.length > 5000) {
             body.textContent = text;
-            if (face) {
-                face.stopSpeaking();
-            }
             return;
         }
         body.textContent = "";
         var cursor = 0;
-        var speechStartedAt = window.performance.now();
-        try {
-            while (cursor < text.length && operationId === machine.operationId) {
-                var naturalSize = /[\u3000-\u9fff]/.test(text[cursor]) ? 2 : 4;
-                var size = Math.max(naturalSize, Math.ceil(text.length / 180));
-                cursor = Math.min(text.length, cursor + size);
-                body.textContent = text.slice(0, cursor);
-                if (face) {
-                    face.setSpeechCharacter(text.charAt(Math.max(0, cursor - 1)));
-                }
-                elements.messages.scrollTop = elements.messages.scrollHeight;
-                await new Promise(function (resolve) {
-                    window.setTimeout(resolve, 14);
-                });
-            }
-            if (cursor < text.length) {
-                body.textContent = text;
-            }
-            var remainingSpeechTime = 420 - (
-                window.performance.now() - speechStartedAt
-            );
-            if (remainingSpeechTime > 0 && operationId === machine.operationId) {
-                await new Promise(function (resolve) {
-                    window.setTimeout(resolve, remainingSpeechTime);
-                });
-            }
-        } finally {
-            if (face) {
-                face.stopSpeaking();
-            }
+        while (cursor < text.length && operationId === machine.operationId) {
+            var naturalSize = /[\u3000-\u9fff]/.test(text[cursor]) ? 2 : 4;
+            var size = Math.max(naturalSize, Math.ceil(text.length / 180));
+            cursor = Math.min(text.length, cursor + size);
+            body.textContent = text.slice(0, cursor);
+            elements.messages.scrollTop = elements.messages.scrollHeight;
+            await new Promise(function (resolve) {
+                window.setTimeout(resolve, 14);
+            });
+        }
+        if (cursor < text.length) {
+            body.textContent = text;
         }
     }
 
@@ -306,77 +290,167 @@
         return chunks;
     }
 
-    function speakResponse(text, operationId) {
+    function ensureSpeechAudioContext() {
+        var Context = window.AudioContext || window.webkitAudioContext;
+        if (!Context) {
+            return null;
+        }
+        if (!speechAudioContext || speechAudioContext.state === "closed") {
+            speechAudioContext = new Context();
+        }
+        if (speechAudioContext.state === "suspended") {
+            speechAudioContext.resume().catch(function () {});
+        }
+        return speechAudioContext;
+    }
+
+    function cancelSpeechPlayback() {
+        if (activeSpeech && activeSpeech.finish) {
+            activeSpeech.finish(false);
+        }
+        activeSpeech = null;
+        if (face) {
+            face.stopSpeaking();
+        }
+    }
+
+    function decodeAudio(base64) {
+        var binary = window.atob(base64);
+        var bytes = new Uint8Array(binary.length);
+        for (var index = 0; index < binary.length; index += 1) {
+            bytes[index] = binary.charCodeAt(index);
+        }
+        return bytes.buffer;
+    }
+
+    async function playSpeechSegment(payload, operationId) {
+        var context = ensureSpeechAudioContext();
+        if (!context) {
+            throw new Error("当前浏览器不支持音频播放");
+        }
+        var buffer = await context.decodeAudioData(
+            decodeAudio(payload.audio_base64).slice(0)
+        );
+        if (operationId !== machine.operationId || !voiceEnabled) {
+            return false;
+        }
+
         return new Promise(function (resolve) {
-            if (!voiceEnabled || !window.speechSynthesis) {
-                resolve(false);
-                return;
-            }
-            window.speechSynthesis.cancel();
-            var chunks = splitSpeechText(text, 240);
-            if (!chunks.length) {
-                resolve(false);
-                return;
-            }
-            var index = 0;
+            var source = context.createBufferSource();
+            var timeline = Array.isArray(payload.visemes) ? payload.visemes : [];
+            var timelineIndex = -1;
+            var animationFrame = null;
             var settled = false;
-            var watchdog = null;
-            function finish(spoke) {
+            var startedAt = context.currentTime;
+
+            function finish(completed) {
                 if (settled) {
                     return;
                 }
                 settled = true;
-                if (watchdog) {
-                    window.clearTimeout(watchdog);
+                if (animationFrame) {
+                    window.cancelAnimationFrame(animationFrame);
+                }
+                source.onended = null;
+                try {
+                    source.stop();
+                } catch (_stopError) {
+                    // BufferSource may already have reached its natural end.
+                }
+                if (activeSpeech && activeSpeech.source === source) {
+                    activeSpeech = null;
                 }
                 if (face) {
                     face.stopSpeaking();
                 }
-                resolve(spoke);
+                resolve(completed);
             }
-            function speakNext() {
-                if (settled || operationId !== machine.operationId || !voiceEnabled) {
+
+            function animateVisemes() {
+                if (
+                    settled || operationId !== machine.operationId
+                    || !voiceEnabled
+                ) {
                     finish(false);
                     return;
                 }
-                if (index >= chunks.length) {
-                    finish(true);
-                    return;
+                var elapsedMs = Math.max(0, context.currentTime - startedAt) * 1000;
+                while (
+                    timelineIndex + 1 < timeline.length
+                    && Number(timeline[timelineIndex + 1].offset_ms) <= elapsedMs
+                ) {
+                    timelineIndex += 1;
+                    if (face) {
+                        face.setViseme(Number(timeline[timelineIndex].id));
+                    }
                 }
-                var chunk = chunks[index];
-                var utterance = new SpeechSynthesisUtterance(chunk);
-                utterance.lang = "zh-CN";
-                utterance.rate = 1;
-                utterance.pitch = 0.92;
-                utterance.onstart = function () {
-                    machine.set("speaking", { operationId: operationId });
-                    if (face) {
-                        face.startSpeaking(chunk, false);
-                    }
-                };
-                utterance.onboundary = function (event) {
-                    if (face && Number.isFinite(event.charIndex)) {
-                        face.setSpeechCharacter(chunk.charAt(event.charIndex));
-                    }
-                };
-                utterance.onend = function () {
-                    window.clearTimeout(watchdog);
-                    watchdog = null;
-                    if (face) {
-                        face.stopSpeaking();
-                    }
-                    index += 1;
-                    speakNext();
-                };
-                utterance.onerror = function () { finish(false); };
-                watchdog = window.setTimeout(function () {
-                    window.speechSynthesis.cancel();
-                    finish(false);
-                }, Math.max(30000, Math.min(120000, chunk.length * 400)));
-                window.speechSynthesis.speak(utterance);
+                animationFrame = window.requestAnimationFrame(animateVisemes);
             }
-            speakNext();
+
+            source.buffer = buffer;
+            source.connect(context.destination);
+            source.onended = function () { finish(true); };
+            activeSpeech = { source: source, finish: finish };
+            machine.set("speaking", { operationId: operationId });
+            if (face) {
+                face.startSpeaking();
+            }
+            source.start(0);
+            startedAt = context.currentTime;
+            animateVisemes();
         });
+    }
+
+    async function speakResponse(text, operationId) {
+        if (!voiceEnabled) {
+            return false;
+        }
+        if (!voiceAvailable) {
+            showToast(voiceUnavailableReason, "error");
+            return false;
+        }
+        cancelSpeechPlayback();
+        var chunks = splitSpeechText(text, 240);
+        if (!chunks.length) {
+            return false;
+        }
+        function requestChunk(index) {
+            return api.request("/api/speech", {
+                method: "POST",
+                body: { text: chunks[index], session_id: sessionId },
+                timeout: 90000
+            }).then(function (payload) {
+                return { payload: payload, error: null };
+            }, function (error) {
+                return { payload: null, error: error };
+            });
+        }
+        try {
+            var pendingChunk = requestChunk(0);
+            for (var index = 0; index < chunks.length; index += 1) {
+                if (operationId !== machine.operationId || !voiceEnabled) {
+                    return false;
+                }
+                var outcome = await pendingChunk;
+                if (outcome.error) {
+                    throw outcome.error;
+                }
+                pendingChunk = index + 1 < chunks.length
+                    ? requestChunk(index + 1)
+                    : null;
+                var completed = await playSpeechSegment(
+                    outcome.payload, operationId
+                );
+                if (!completed) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (error) {
+            cancelSpeechPlayback();
+            showToast(error.message || "语音播放失败", "error");
+            return false;
+        }
     }
 
     async function sendMessage() {
@@ -385,6 +459,9 @@
             return;
         }
         var operationId = machine.begin("thinking");
+        if (voiceEnabled) {
+            ensureSpeechAudioContext();
+        }
         setBusy(true);
         var pending = null;
 
@@ -392,12 +469,7 @@
             if (!sessionId) {
                 await ensureSession();
             }
-            if (window.speechSynthesis) {
-                window.speechSynthesis.cancel();
-            }
-            if (face) {
-                face.stopSpeaking();
-            }
+            cancelSpeechPlayback();
             addMessage("user", message, false);
             elements["user-input"].value = "";
             resizeComposer();
@@ -443,6 +515,9 @@
         elements["voice-button"].setAttribute(
             "aria-label", voiceEnabled ? "关闭语音播报" : "开启语音播报"
         );
+        elements["voice-button"].title = voiceAvailable
+            ? (voiceEnabled ? "关闭同步语音" : "开启同步语音")
+            : voiceUnavailableReason;
         replaceButtonIcon(elements["voice-button"], voiceEnabled ? "volume-2" : "volume-x");
     }
 
@@ -886,6 +961,7 @@
             return;
         }
         try {
+            cancelSpeechPlayback();
             await createSession();
             elements.messages.replaceChildren();
             machine.set("idle");
@@ -927,11 +1003,13 @@
         elements["voice-button"].addEventListener("click", function () {
             voiceEnabled = !voiceEnabled;
             window.localStorage.setItem("jarvis.voiceEnabled", String(voiceEnabled));
-            if (!voiceEnabled && window.speechSynthesis) {
-                window.speechSynthesis.cancel();
-            }
-            if (!voiceEnabled && face) {
-                face.stopSpeaking();
+            if (voiceEnabled) {
+                ensureSpeechAudioContext();
+                if (!voiceAvailable) {
+                    showToast(voiceUnavailableReason, "error");
+                }
+            } else {
+                cancelSpeechPlayback();
             }
             updateVoiceButton();
         });

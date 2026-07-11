@@ -1,3 +1,4 @@
+import base64
 import sqlite3
 import stat
 import threading
@@ -6,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import jarvis.api.web_app as web_module
+from jarvis.voice import SpeechSynthesisError, SpeechSynthesisResult
 
 
 class FakeLLM:
@@ -37,6 +39,29 @@ class FakeLLM:
         return "system"
 
 
+class FakeSpeechSynthesizer:
+    available = True
+    provider = "test-speech"
+    voice = "test-voice"
+    reason = ""
+
+    def __init__(self):
+        self.calls = []
+
+    def synthesize(self, text):
+        self.calls.append(text)
+        return SpeechSynthesisResult(
+            audio=b"RIFFtest-wave",
+            mime_type="audio/wav",
+            visemes=[
+                {"offset_ms": 0.0, "id": 0},
+                {"offset_ms": 82.5, "id": 6},
+            ],
+            provider=self.provider,
+            voice=self.voice,
+        )
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(web_module, "_post_chat_tasks", lambda *args: None)
@@ -66,6 +91,8 @@ def test_fresh_app_health_status_and_security_headers(client):
     status = client.get("/api/status")
     assert status.status_code == 200
     assert status.get_json()["data"]["model"] == "test-model"
+    assert status.get_json()["data"]["speech"]["available"] is False
+    assert status.get_json()["data"]["speech"]["provider"] == "azure"
     assert status.headers["X-Frame-Options"] == "DENY"
     assert "default-src 'self'" in status.headers["Content-Security-Policy"]
     assert status.headers["Cache-Control"] == "no-store"
@@ -627,37 +654,106 @@ def test_skill_metric_failure_does_not_drop_generated_response(client, monkeypat
     assert stored == "skill response"
 
 
-def test_index_uses_scanned_human_face_assets_not_wave_markup(client):
+def test_index_uses_generated_low_poly_face_not_external_scan(client):
     html = client.get("/").get_data(as_text=True)
     assert 'id="face-canvas"' in html
     assert "jarvis-face.js" in html
-    assert "GLTFLoader.js" in html
-    assert "LeePerrySmith.glb" in html
+    assert "GLTFLoader.js" not in html
+    assert "LeePerrySmith.glb" not in html
     assert "audioWaveData" not in html
 
-    model = client.get("/static/models/lee-perry-smith/LeePerrySmith.glb")
-    assert model.status_code == 200
-    assert model.data[:4] == b"glTF"
 
-
-def test_face_animation_is_connected_to_text_and_voice_output(client):
+def test_face_animation_consumes_service_visemes_on_audio_clock(client):
     face_script = client.get("/static/js/jarvis-face.js").get_data(as_text=True)
     app_script = client.get("/static/js/app.js").get_data(as_text=True)
 
-    assert "_deformMouth" in face_script
-    assert "_buildEyes" not in face_script
+    assert "VISEME_SHAPES" in face_script
+    assert "setViseme" in face_script
+    assert "new THREE.IcosahedronGeometry(1, 3)" in face_script
     assert "depthWrite: true" in face_script
     assert "wireframe: true" in face_script
-    assert "new THREE.EdgesGeometry" not in face_script
-    assert "visemeForCharacter" in face_script
-    assert "mouthRig.position.set(0, 0.2, 2.25)" in face_script
-    assert "lipRim" not in face_script
-    assert "data-mouth-open" not in face_script
     assert "dataset.mouthOpen" in face_script
-    assert "face.setSpeechCharacter" in app_script
-    assert "face.startSpeaking(chunk, false)" in app_script
-    assert "utterance.onboundary" in app_script
+    assert "visemeForCharacter" not in face_script
+    assert "setSpeechCharacter" not in face_script
+
+    assert 'api.request("/api/speech"' in app_script
+    assert "context.currentTime - startedAt" in app_script
+    assert "face.setViseme" in app_script
+    assert "face.startSpeaking()" in app_script
     assert "face.stopSpeaking()" in app_script
+    assert "SpeechSynthesisUtterance" not in app_script
+    assert "utterance.onboundary" not in app_script
+
+
+def test_speech_endpoint_returns_audio_and_matching_visemes(client):
+    synthesizer = FakeSpeechSynthesizer()
+    client.application.extensions["speech_synthesizer"] = synthesizer
+    session_id = create_session(client)
+
+    response = client.post("/api/speech", json={
+        "session_id": session_id,
+        "text": "你好",
+    })
+
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert base64.b64decode(data["audio_base64"]) == b"RIFFtest-wave"
+    assert data["mime_type"] == "audio/wav"
+    assert data["visemes"] == [
+        {"offset_ms": 0.0, "id": 0},
+        {"offset_ms": 82.5, "id": 6},
+    ]
+    assert data["provider"] == "test-speech"
+    assert synthesizer.calls == ["你好"]
+
+
+def test_speech_endpoint_validates_session_text_and_provider(client):
+    missing_session = client.post("/api/speech", json={"text": "你好"})
+    assert missing_session.status_code == 401
+    assert missing_session.get_json()["error"]["code"] == "invalid_session"
+
+    session_id = create_session(client)
+    empty = client.post("/api/speech", json={
+        "session_id": session_id,
+        "text": "  ",
+    })
+    assert empty.status_code == 400
+    assert empty.get_json()["error"]["code"] == "invalid_speech_text"
+
+    too_long = client.post("/api/speech", json={
+        "session_id": session_id,
+        "text": "字" * 501,
+    })
+    assert too_long.status_code == 400
+    assert too_long.get_json()["error"]["code"] == "speech_text_too_long"
+
+    unavailable = client.post("/api/speech", json={
+        "session_id": session_id,
+        "text": "你好",
+    })
+    assert unavailable.status_code == 503
+    assert unavailable.get_json()["error"]["code"] == "speech_unavailable"
+
+
+def test_speech_provider_errors_are_classified(client):
+    class FailingSpeech(FakeSpeechSynthesizer):
+        def synthesize(self, _text):
+            raise SpeechSynthesisError(
+                "speech_provider_failed", "语音服务未能生成音频"
+            )
+
+    client.application.extensions["speech_synthesizer"] = FailingSpeech()
+    session_id = create_session(client)
+    response = client.post("/api/speech", json={
+        "session_id": session_id,
+        "text": "你好",
+    })
+
+    assert response.status_code == 502
+    assert response.get_json()["error"] == {
+        "code": "speech_provider_failed",
+        "message": "语音服务未能生成音频",
+    }
 
 
 def test_frontend_speech_chunks_full_responses(client):

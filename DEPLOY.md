@@ -19,6 +19,11 @@ export ANTHROPIC_AUTH_TOKEN='your-token'
 export ANTHROPIC_BASE_URL='https://gateway.example/anthropic'
 export ANTHROPIC_MODEL='provider-model-name'
 export ANTHROPIC_TOTAL_TIMEOUT_SECONDS=95
+
+# Optional: exact speech/lip synchronization
+export AZURE_SPEECH_KEY='your-azure-speech-key'
+export AZURE_SPEECH_REGION='your-resource-region'
+export AZURE_SPEECH_VOICE='zh-CN-YunxiNeural'
 ```
 
 服务启动不会探测或调用模型。`GET /health` 只检查数据库，模型可用状态通过 `GET /api/status` 返回。

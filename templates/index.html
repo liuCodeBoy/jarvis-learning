@@ -11,8 +11,7 @@
     <div class="app-shell" id="app-shell">
         <canvas
             id="face-canvas"
-            aria-label="贾维斯全息人脸状态反馈"
-            data-model-url="{{ url_for('static', filename='models/lee-perry-smith/LeePerrySmith.glb') }}"
+            aria-label="贾维斯低多边形网格人脸状态反馈"
         ></canvas>
         <div class="webgl-fallback" id="webgl-fallback" hidden>
             <div class="fallback-face" aria-hidden="true">
@@ -192,7 +191,6 @@
     </dialog>
 
     <script src="{{ url_for('static', filename='vendor/three/three.min.js') }}" defer></script>
-    <script src="{{ url_for('static', filename='vendor/three/examples/js/loaders/GLTFLoader.js') }}" defer></script>
     <script src="{{ url_for('static', filename='vendor/lucide/lucide.min.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/state-machine.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/jarvis-face.js') }}" defer></script>

@@ -4,6 +4,7 @@
 Flask>=3.0,<4
 gunicorn>=22,<24
 requests>=2.31,<3
+azure-cognitiveservices-speech>=1.41,<2
 
 # Runtime configuration and monitoring
 PyYAML>=6.0,<7

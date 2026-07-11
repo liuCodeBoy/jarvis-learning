@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -224,6 +225,14 @@ class SecurityAuditor:
         value = raw_value.strip().rstrip(",;").strip()
         if not value:
             return ""
+        if suffix == ".py":
+            try:
+                parsed = ast.literal_eval(value)
+            except (SyntaxError, ValueError):
+                return None
+            if parsed is None:
+                return ""
+            return parsed if isinstance(parsed, str) else None
         if value[0] in {'"', "'"}:
             quote = value[0]
             escaped = False
@@ -453,23 +462,32 @@ class SecurityAuditor:
             )
             return
 
-        try:
-            uri = self.db_path.resolve().as_uri() + "?mode=ro"
-            with sqlite3.connect(uri, uri=True, timeout=5) as connection:
-                integrity_rows = [
-                    str(row[0]) for row in connection.execute("PRAGMA integrity_check")
-                ]
-                connection.execute("PRAGMA foreign_keys=ON")
-                foreign_key_rows = connection.execute(
-                    "PRAGMA foreign_key_check"
-                ).fetchall()
-        except sqlite3.Error as exc:
+        uri = self.db_path.resolve().as_uri() + "?mode=ro"
+        database_error: Optional[sqlite3.Error] = None
+        for attempt in range(3):
+            try:
+                with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+                    integrity_rows = [
+                        str(row[0])
+                        for row in connection.execute("PRAGMA integrity_check")
+                    ]
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    foreign_key_rows = connection.execute(
+                        "PRAGMA foreign_key_check"
+                    ).fetchall()
+                database_error = None
+                break
+            except sqlite3.Error as exc:
+                database_error = exc
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+        if database_error is not None:
             self._record(
                 "database.integrity",
                 "database",
                 "critical",
                 "SQLite validation failed",
-                {"path": str(self.db_path), "error": str(exc)},
+                {"path": str(self.db_path), "error": str(database_error)},
             )
             return
 

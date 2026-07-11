@@ -2,56 +2,94 @@
     "use strict";
 
     var STATE_STYLE = {
-        idle: { color: 0x66ddd8, tilt: 0, opacity: 0.14 },
-        listening: { color: 0x9ce8bd, tilt: -0.018, opacity: 0.2 },
-        thinking: { color: 0xffca61, tilt: 0.014, opacity: 0.18 },
-        speaking: { color: 0x66ddd8, tilt: 0, opacity: 0.24 },
-        executing: { color: 0x9ce8bd, tilt: 0, opacity: 0.2 },
-        error: { color: 0xff7373, tilt: 0, opacity: 0.26 }
+        idle: { color: 0x66ddd8, tilt: 0, opacity: 0.18 },
+        listening: { color: 0x9ce8bd, tilt: -0.012, opacity: 0.27 },
+        thinking: { color: 0xffca61, tilt: 0.012, opacity: 0.23 },
+        speaking: { color: 0x66ddd8, tilt: 0, opacity: 0.3 },
+        executing: { color: 0x9ce8bd, tilt: 0, opacity: 0.25 },
+        error: { color: 0xff7373, tilt: 0, opacity: 0.32 }
+    };
+
+    // Azure Speech viseme IDs. These are phoneme groups emitted by the TTS
+    // service, not guesses derived from response text.
+    var VISEME_SHAPES = {
+        0: { open: 0.02, width: 1.02 }, // silence
+        1: { open: 0.72, width: 1.02 }, // ae, ax, ah
+        2: { open: 0.9, width: 0.96 },  // aa
+        3: { open: 0.72, width: 0.78 }, // ao
+        4: { open: 0.56, width: 1.05 }, // ey, eh, uh
+        5: { open: 0.42, width: 0.82 }, // er
+        6: { open: 0.3, width: 1.24 },  // y, iy, ih, ix
+        7: { open: 0.34, width: 0.58 }, // w, uw
+        8: { open: 0.48, width: 0.64 }, // ow
+        9: { open: 0.75, width: 0.84 }, // aw
+        10: { open: 0.62, width: 0.75 }, // oy
+        11: { open: 0.62, width: 1.02 }, // ay
+        12: { open: 0.4, width: 0.98 }, // h
+        13: { open: 0.35, width: 0.86 }, // r
+        14: { open: 0.38, width: 1.08 }, // l
+        15: { open: 0.2, width: 1.16 },  // s, z
+        16: { open: 0.32, width: 0.82 }, // sh, ch, jh, zh
+        17: { open: 0.22, width: 1.04 }, // th, dh
+        18: { open: 0.14, width: 1.1 },  // f, v
+        19: { open: 0.28, width: 1.02 }, // d, t, n
+        20: { open: 0.38, width: 0.92 }, // k, g, ng
+        21: { open: 0.04, width: 0.92 }  // p, b, m
     };
 
     function clamp(value, minimum, maximum) {
         return Math.max(minimum, Math.min(maximum, value));
     }
 
-    function smoothstep(minimum, maximum, value) {
-        var normalized = clamp((value - minimum) / (maximum - minimum), 0, 1);
-        return normalized * normalized * (3 - 2 * normalized);
+    function makeMaterial(color, opacity) {
+        return new THREE.MeshBasicMaterial({
+            color: color,
+            transparent: opacity < 1,
+            opacity: opacity,
+            depthTest: true,
+            depthWrite: opacity >= 1,
+            side: THREE.DoubleSide
+        });
     }
 
-    function visemeForCharacter(character) {
-        var value = String(character || " ");
-        if (/\s|[，。！？；：,.!?;:]/.test(value)) {
-            return { open: 0.015, width: 1 };
-        }
-        if (/[bmp]/i.test(value)) {
-            return { open: 0.025, width: 1.02 };
-        }
-        if (/[o0]/i.test(value)) {
-            return { open: 0.3, width: 0.76 };
-        }
-        if (/[u]/i.test(value)) {
-            return { open: 0.2, width: 0.72 };
-        }
-        if (/[ae]/i.test(value)) {
-            return { open: 0.44, width: 1.02 };
-        }
-        if (/[iy]/i.test(value)) {
-            return { open: 0.18, width: 1.14 };
-        }
-        var code = value.charCodeAt(0) || 32;
-        return {
-            open: 0.2 + (code % 5) * 0.055,
-            width: 0.86 + (code % 5) * 0.065
-        };
+    function makeEye(x, accentMaterial, darkMaterial) {
+        var group = new THREE.Group();
+        group.position.set(x, 0.2, 0.654);
+
+        var socket = new THREE.Mesh(
+            new THREE.CircleGeometry(0.12, 32), darkMaterial
+        );
+        socket.scale.set(1.42, 0.58, 1);
+
+        var iris = new THREE.Mesh(
+            new THREE.RingGeometry(0.041, 0.069, 28), accentMaterial
+        );
+        iris.position.z = 0.004;
+        var pupil = new THREE.Mesh(
+            new THREE.CircleGeometry(0.021, 24), accentMaterial
+        );
+        pupil.position.z = 0.006;
+        group.add(socket, iris, pupil);
+        group.userData.iris = iris;
+        group.userData.pupil = pupil;
+        return group;
+    }
+
+    function makeBrow(x, mirror, material) {
+        var start = new THREE.Vector3(x - 0.13 * mirror, 0.37, 0.642);
+        var middle = new THREE.Vector3(x, 0.405, 0.658);
+        var end = new THREE.Vector3(x + 0.14 * mirror, 0.37, 0.642);
+        var curve = new THREE.QuadraticBezierCurve3(start, middle, end);
+        return new THREE.Mesh(
+            new THREE.TubeGeometry(curve, 14, 0.009, 6, false), material
+        );
     }
 
     function JarvisFace(canvas) {
-        if (!window.THREE || !THREE.GLTFLoader) {
-            throw new Error("Three.js face model loader is unavailable");
+        if (!window.THREE) {
+            throw new Error("Three.js is unavailable");
         }
         this.canvas = canvas;
-        this.modelUrl = canvas.dataset.modelUrl;
         this.reducedMotion = window.matchMedia(
             "(prefers-reduced-motion: reduce)"
         ).matches;
@@ -59,23 +97,19 @@
         this.audioLevel = 0;
         this.smoothedAudio = 0;
         this.speechActive = false;
-        this.speechManual = false;
-        this.speechText = "";
-        this.speechStarted = 0;
-        this.speechImpulse = 0;
-        this.speechWidth = 1;
-        this.currentMouthOpen = 0;
-        this.mouthVelocity = 0;
+        this.currentViseme = 0;
+        this.targetMouth = VISEME_SHAPES[0];
+        this.currentMouthOpen = 0.02;
+        this.currentMouthWidth = 1.02;
         this.pointer = { x: 0, y: 0 };
         this.clock = new THREE.Clock();
         this.elapsed = 0;
         this.frameAccumulator = 0;
+        this.nextBlinkAt = 2.4;
+        this.blinkStartedAt = -1;
         this.workspaceOpen = false;
         this.layoutX = 0;
         this.layoutY = 0;
-        this.modelReady = false;
-        this.headGeometry = null;
-        this.basePositions = null;
 
         this.renderer = new THREE.WebGLRenderer({
             canvas: canvas,
@@ -95,40 +129,17 @@
         this.faceRoot.add(this.modelRoot);
         this.scene.add(this.faceRoot);
 
-        this.scene.add(new THREE.AmbientLight(0x6ca5a5, 0.7));
-        var keyLight = new THREE.PointLight(0xc7ffff, 1.1, 10);
+        this.scene.add(new THREE.AmbientLight(0x79a5a5, 0.65));
+        var keyLight = new THREE.PointLight(0xc7ffff, 0.95, 10);
         keyLight.position.set(-2.1, 1.7, 3.6);
         this.scene.add(keyLight);
-        var rimLight = new THREE.PointLight(0xffd37d, 0.38, 8);
+        var rimLight = new THREE.PointLight(0xffd37d, 0.3, 8);
         rimLight.position.set(2.3, -0.5, 2.6);
         this.scene.add(rimLight);
 
-        this.wireMaterial = new THREE.MeshBasicMaterial({
-            color: 0x66ddd8,
-            wireframe: true,
-            transparent: true,
-            opacity: 0.1,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-            depthTest: true
-        });
-        this.surfaceMaterial = new THREE.MeshPhongMaterial({
-            color: 0x102326,
-            emissive: 0x02090b,
-            specular: 0x78a7a5,
-            shininess: 46,
-            transparent: false,
-            depthWrite: true,
-            depthTest: true,
-            side: THREE.FrontSide,
-            polygonOffset: true,
-            polygonOffsetFactor: 1,
-            polygonOffsetUnits: 1
-        });
-        this._buildLoadingMesh();
-        this._buildMouthRig();
-        this._loadHeadModel();
+        this._buildFace();
         this.resize();
+        this.canvas.dataset.faceReady = "true";
 
         var self = this;
         this._resizeHandler = function () { self.resize(); };
@@ -141,83 +152,106 @@
         this.renderer.setAnimationLoop(function () { self._render(); });
     }
 
-    JarvisFace.prototype._buildLoadingMesh = function () {
-        var geometry = new THREE.IcosahedronGeometry(1, 4);
-        geometry.scale(0.7, 0.92, 0.62);
-        this.loadingMesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    JarvisFace.prototype._buildFace = function () {
+        var geometry = new THREE.IcosahedronGeometry(1, 3);
+        var positions = geometry.attributes.position;
+        for (var index = 0; index < positions.count; index += 1) {
+            var y = positions.getY(index);
+            var jawTaper = y < -0.12 ? 1 - Math.min(0.2, (-y - 0.12) * 0.2) : 1;
+            positions.setXYZ(
+                index,
+                positions.getX(index) * 0.76 * jawTaper,
+                y,
+                positions.getZ(index) * 0.68
+            );
+        }
+        positions.needsUpdate = true;
+        geometry.computeVertexNormals();
+
+        this.surfaceMaterial = new THREE.MeshPhongMaterial({
+            color: 0x0a1a1d,
+            emissive: 0x010607,
+            specular: 0x568b89,
+            shininess: 34,
+            depthTest: true,
+            depthWrite: true,
+            side: THREE.FrontSide,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
+        });
+        this.wireMaterial = new THREE.MeshBasicMaterial({
             color: 0x66ddd8,
             wireframe: true,
             transparent: true,
-            opacity: 0.12,
+            opacity: STATE_STYLE.idle.opacity,
             blending: THREE.AdditiveBlending,
+            depthTest: true,
             depthWrite: false
-        }));
-        this.modelRoot.add(this.loadingMesh);
-    };
+        });
+        this.featureMaterial = makeMaterial(0x77e3df, 0.94);
+        this.eyeMaterial = makeMaterial(0xa7f2d2, 1);
+        this.darkMaterial = makeMaterial(0x010506, 1);
 
-    JarvisFace.prototype._buildMouthRig = function () {
-        this.mouthRig = new THREE.Group();
-        this.mouthRig.position.set(0, 0.2, 2.25);
-        this.mouthRig.visible = false;
+        this.surfaceMesh = new THREE.Mesh(geometry, this.surfaceMaterial);
+        this.wireMesh = new THREE.Mesh(geometry, this.wireMaterial);
+        this.surfaceMesh.renderOrder = 1;
+        this.wireMesh.renderOrder = 2;
+        this.modelRoot.add(this.surfaceMesh, this.wireMesh);
 
-        var shape = new THREE.Shape();
-        shape.absellipse(0, 0, 0.58, 0.11, 0, Math.PI * 2, false, 0);
-        this.mouthCavity = new THREE.Mesh(
-            new THREE.ShapeGeometry(shape, 28),
-            new THREE.MeshBasicMaterial({
-                color: 0x010507,
+        this.leftEye = makeEye(-0.24, this.eyeMaterial, this.darkMaterial);
+        this.rightEye = makeEye(0.24, this.eyeMaterial, this.darkMaterial);
+        this.leftBrow = makeBrow(-0.24, 1, this.featureMaterial);
+        this.rightBrow = makeBrow(0.24, -1, this.featureMaterial);
+        this.modelRoot.add(
+            this.leftEye, this.rightEye, this.leftBrow, this.rightBrow
+        );
+
+        var noseGeometry = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(0, 0.08, 0.682),
+            new THREE.Vector3(-0.035, -0.08, 0.674),
+            new THREE.Vector3(0.04, -0.08, 0.674)
+        ]);
+        this.nose = new THREE.Line(
+            noseGeometry,
+            new THREE.LineBasicMaterial({
+                color: 0x66aaa7,
                 transparent: true,
-                opacity: 0,
-                depthWrite: false,
-                depthTest: false,
-                side: THREE.DoubleSide
+                opacity: 0.58,
+                depthTest: true
             })
         );
-        this.mouthCavity.scale.y = 0.04;
-        this.mouthCavity.renderOrder = 5;
+        this.modelRoot.add(this.nose);
 
-        this.mouthRig.add(this.mouthCavity);
+        this.mouthRig = new THREE.Group();
+        this.mouthRig.position.set(0, -0.285, 0.665);
+        this.mouthRig.rotation.x = 0.19;
+        this.mouthCavity = new THREE.Mesh(
+            new THREE.CircleGeometry(0.115, 36), this.darkMaterial
+        );
+        this.mouthRim = new THREE.Mesh(
+            new THREE.RingGeometry(0.112, 0.128, 36), this.featureMaterial
+        );
+        this.mouthRim.position.z = 0.004;
+        this.mouthRig.add(this.mouthCavity, this.mouthRim);
         this.modelRoot.add(this.mouthRig);
-    };
 
-    JarvisFace.prototype._loadHeadModel = function () {
-        var self = this;
-        var loader = new THREE.GLTFLoader();
-        loader.load(this.modelUrl, function (gltf) {
-            var sourceMesh = null;
-            gltf.scene.traverse(function (object) {
-                if (!sourceMesh && object.isMesh) {
-                    sourceMesh = object;
-                }
-            });
-            if (!sourceMesh || !sourceMesh.geometry) {
-                throw new Error("Head scan contains no mesh");
-            }
-
-            var geometry = sourceMesh.geometry.clone();
-            geometry.center();
-            geometry.computeVertexNormals();
-            self.headGeometry = geometry;
-            self.basePositions = new Float32Array(
-                geometry.attributes.position.array
-            );
-
-            self.surfaceMesh = new THREE.Mesh(geometry, self.surfaceMaterial);
-            self.wireMesh = new THREE.Mesh(geometry, self.wireMaterial);
-            self.surfaceMesh.renderOrder = 1;
-            self.wireMesh.renderOrder = 2;
-            self.modelRoot.add(
-                self.surfaceMesh,
-                self.wireMesh
-            );
-
-            self.loadingMesh.visible = false;
-            self.mouthRig.visible = true;
-            self.modelReady = true;
-            self.canvas.dataset.faceReady = "true";
-        }, undefined, function () {
-            self.canvas.dataset.faceReady = "false";
+        var templeMaterial = new THREE.MeshBasicMaterial({
+            color: 0x66ddd8,
+            transparent: true,
+            opacity: 0.28,
+            depthTest: true,
+            depthWrite: false,
+            side: THREE.DoubleSide
         });
+        [-1, 1].forEach(function (side) {
+            var temple = new THREE.Mesh(
+                new THREE.RingGeometry(0.07, 0.083, 24), templeMaterial
+            );
+            temple.position.set(side * 0.735, 0.02, 0);
+            temple.rotation.y = Math.PI / 2;
+            this.modelRoot.add(temple);
+        }, this);
     };
 
     JarvisFace.prototype.setState = function (state) {
@@ -234,28 +268,23 @@
         this.audioLevel = clamp(Number(level) || 0, 0, 1);
     };
 
-    JarvisFace.prototype.startSpeaking = function (text, manualTiming) {
+    JarvisFace.prototype.startSpeaking = function () {
         this.speechActive = true;
-        this.speechManual = Boolean(manualTiming);
-        this.speechText = String(text || "");
-        this.speechStarted = this.elapsed;
-        this.speechImpulse = 0.2;
-        this.speechWidth = 1;
+        this.setViseme(0);
     };
 
-    JarvisFace.prototype.setSpeechCharacter = function (character) {
-        var viseme = visemeForCharacter(character);
-        this.speechManual = true;
-        this.speechImpulse = viseme.open;
-        this.speechWidth = viseme.width;
+    JarvisFace.prototype.setViseme = function (visemeId) {
+        var normalized = Number(visemeId);
+        if (!Number.isInteger(normalized) || !VISEME_SHAPES[normalized]) {
+            normalized = 0;
+        }
+        this.currentViseme = normalized;
+        this.targetMouth = VISEME_SHAPES[normalized];
     };
 
     JarvisFace.prototype.stopSpeaking = function () {
         this.speechActive = false;
-        this.speechManual = false;
-        this.speechText = "";
-        this.speechImpulse = 0;
-        this.speechWidth = 1;
+        this.setViseme(0);
     };
 
     JarvisFace.prototype.setWorkspaceOpen = function (isOpen) {
@@ -271,75 +300,41 @@
         this.camera.updateProjectionMatrix();
 
         if (width <= 700) {
-            this.modelRoot.scale.set(0.19, 0.225, 0.21);
+            this.modelRoot.scale.setScalar(0.5);
             this.layoutX = 0;
-            this.layoutY = 0.7;
+            this.layoutY = 0.72;
         } else if (width < 1100) {
-            this.modelRoot.scale.set(0.225, 0.265, 0.24);
-            this.layoutX = 0.44;
-            this.layoutY = 0.04;
+            this.modelRoot.scale.setScalar(0.82);
+            this.layoutX = 0.42;
+            this.layoutY = 0.05;
         } else if (this.workspaceOpen) {
-            this.modelRoot.scale.set(0.205, 0.245, 0.225);
+            this.modelRoot.scale.setScalar(0.78);
             this.layoutX = 0;
             this.layoutY = 0.04;
         } else {
-            this.modelRoot.scale.set(0.245, 0.285, 0.255);
-            this.layoutX = 0.38;
+            this.modelRoot.scale.setScalar(0.92);
+            this.layoutX = 0.42;
             this.layoutY = 0.04;
         }
     };
 
-    JarvisFace.prototype._speechShape = function () {
-        if (this.state !== "speaking" || !this.speechActive) {
-            return { open: 0, width: 1 };
+    JarvisFace.prototype._blinkScale = function () {
+        if (this.reducedMotion) {
+            return 1;
         }
-        if (this.speechManual) {
-            return { open: this.speechImpulse, width: this.speechWidth };
+        if (this.blinkStartedAt < 0 && this.elapsed >= this.nextBlinkAt) {
+            this.blinkStartedAt = this.elapsed;
         }
-        if (!this.speechText) {
-            return {
-                open: 0.18 + Math.abs(Math.sin(this.elapsed * 6.8)) * 0.2,
-                width: 1
-            };
+        if (this.blinkStartedAt < 0) {
+            return 1;
         }
-        var progress = Math.max(0, this.elapsed - this.speechStarted);
-        var character = this.speechText.charAt(
-            Math.floor(progress * 8.5) % this.speechText.length
-        );
-        return visemeForCharacter(character);
-    };
-
-    JarvisFace.prototype._deformMouth = function (openAmount, widthAmount) {
-        if (!this.headGeometry || !this.basePositions) {
-            return;
+        var progress = (this.elapsed - this.blinkStartedAt) / 0.17;
+        if (progress >= 1) {
+            this.blinkStartedAt = -1;
+            this.nextBlinkAt = this.elapsed + 2.6 + Math.random() * 2.4;
+            return 1;
         }
-        var attribute = this.headGeometry.attributes.position;
-        var array = attribute.array;
-        var base = this.basePositions;
-        var index;
-        for (index = 0; index < attribute.count; index += 1) {
-            var offset = index * 3;
-            var x = base[offset];
-            var y = base[offset + 1];
-            var z = base[offset + 2];
-            var frontWeight = smoothstep(1.35, 2.15, z);
-            var mouthX = 1 - smoothstep(0.62, 1.34, Math.abs(x));
-            var mouthY = 1 - smoothstep(0.12, 0.34, Math.abs(y - 0.2));
-            var mouthWeight = frontWeight * mouthX * mouthY;
-            var lowerLip = smoothstep(0.2, -0.08, y);
-            var upperLip = 1 - lowerLip;
-            var jawWeight = frontWeight
-                * smoothstep(0.14, -1.25, y)
-                * (1 - smoothstep(1.35, 2.7, Math.abs(x)));
-
-            array[offset] = x * (1 + (widthAmount - 1) * mouthWeight * 0.22);
-            array[offset + 1] = y
-                - openAmount * mouthWeight * lowerLip * 0.32
-                + openAmount * mouthWeight * upperLip * 0.06
-                - openAmount * jawWeight * 0.12;
-            array[offset + 2] = z + openAmount * mouthWeight * 0.02;
-        }
-        attribute.needsUpdate = true;
+        return 1 - Math.sin(progress * Math.PI) * 0.92;
     };
 
     JarvisFace.prototype._render = function () {
@@ -358,43 +353,59 @@
         delta = Math.min(this.frameAccumulator, 0.125);
         this.frameAccumulator = 0;
         this.elapsed += delta;
+
         var style = STATE_STYLE[this.state];
         var lerp = 1 - Math.pow(0.001, delta);
         var targetColor = new THREE.Color(style.color);
-        var surfaceColor = targetColor.clone().multiplyScalar(0.12);
-
+        var surfaceColor = targetColor.clone().multiplyScalar(0.105);
         this.wireMaterial.color.lerp(targetColor, lerp * 0.6);
+        this.featureMaterial.color.lerp(targetColor, lerp * 0.5);
         this.surfaceMaterial.color.lerp(surfaceColor, lerp * 0.16);
         this.wireMaterial.opacity += (
             style.opacity - this.wireMaterial.opacity
         ) * lerp;
 
-        if (this.speechManual) {
-            this.speechImpulse *= Math.pow(0.12, delta);
-        }
-        var speech = this._speechShape();
-        var targetOpen = this.reducedMotion ? speech.open * 0.62 : speech.open;
-        this.mouthVelocity += (
-            targetOpen - this.currentMouthOpen
-        ) * 72 * delta;
-        this.mouthVelocity *= Math.exp(-13 * delta);
-        this.currentMouthOpen = clamp(
-            this.currentMouthOpen + this.mouthVelocity * delta,
-            0,
-            0.52
-        );
-        this._deformMouth(this.currentMouthOpen, speech.width);
-        this.mouthCavity.scale.y += (
-            0.04 + this.currentMouthOpen * 2.3 - this.mouthCavity.scale.y
-        ) * Math.min(1, delta * 14);
-        this.mouthCavity.scale.x += (
-            speech.width - this.mouthCavity.scale.x
-        ) * lerp;
-        this.mouthCavity.material.opacity += (
-            clamp(this.currentMouthOpen * 2.6, 0, 0.9)
-                - this.mouthCavity.material.opacity
+        var mouth = this.speechActive ? this.targetMouth : VISEME_SHAPES[0];
+        this.currentMouthOpen += (
+            mouth.open - this.currentMouthOpen
+        ) * Math.min(1, delta * 22);
+        this.currentMouthWidth += (
+            mouth.width - this.currentMouthWidth
         ) * Math.min(1, delta * 18);
+        var mouthWidth = 0.95 * this.currentMouthWidth;
+        var mouthHeight = 0.07 + this.currentMouthOpen * 1.15;
+        this.mouthCavity.scale.set(mouthWidth, mouthHeight, 1);
+        this.mouthRim.scale.set(mouthWidth, mouthHeight, 1);
+        this.mouthRig.position.y = -0.285 - this.currentMouthOpen * 0.025;
         this.canvas.dataset.mouthOpen = this.currentMouthOpen.toFixed(3);
+        this.canvas.dataset.viseme = String(this.currentViseme);
+
+        var blinkScale = this._blinkScale();
+        var eyeStateScale = this.state === "listening" ? 1.08 : 1;
+        this.leftEye.scale.y = blinkScale * eyeStateScale;
+        this.rightEye.scale.y = blinkScale * eyeStateScale;
+        this.smoothedAudio += (
+            this.audioLevel - this.smoothedAudio
+        ) * Math.min(1, delta * 12);
+        var irisScale = 1 + this.smoothedAudio * 0.18;
+        [this.leftEye, this.rightEye].forEach(function (eye, index) {
+            var direction = index === 0 ? -1 : 1;
+            var gazeX = this.pointer.x * 0.015;
+            var gazeY = this.pointer.y * 0.01;
+            if (this.state === "thinking") {
+                gazeX += direction * 0.004;
+                gazeY += 0.018;
+            }
+            eye.userData.iris.position.x += (
+                gazeX - eye.userData.iris.position.x
+            ) * lerp;
+            eye.userData.iris.position.y += (
+                gazeY - eye.userData.iris.position.y
+            ) * lerp;
+            eye.userData.pupil.position.x = eye.userData.iris.position.x;
+            eye.userData.pupil.position.y = eye.userData.iris.position.y;
+            eye.userData.iris.scale.setScalar(irisScale);
+        }, this);
 
         var drift = this.reducedMotion
             ? 0
@@ -414,10 +425,6 @@
         this.faceRoot.position.y += (
             this.layoutY - this.faceRoot.position.y
         ) * lerp;
-
-        this.smoothedAudio += (
-            this.audioLevel - this.smoothedAudio
-        ) * Math.min(1, delta * 12);
         if (this.state === "error" && !this.reducedMotion) {
             this.faceRoot.position.x += (Math.random() - 0.5) * 0.003;
         }
@@ -427,8 +434,9 @@
 
     JarvisFace.prototype.getDiagnostics = function () {
         return {
-            modelReady: this.modelReady,
+            modelReady: true,
             mouthOpen: this.currentMouthOpen,
+            viseme: this.currentViseme,
             state: this.state
         };
     };
@@ -450,7 +458,7 @@
             }
         });
         geometries.forEach(function (geometry) { geometry.dispose(); });
-        materials.forEach(function (item) { item.dispose(); });
+        materials.forEach(function (material) { material.dispose(); });
         this.renderer.dispose();
     };
 

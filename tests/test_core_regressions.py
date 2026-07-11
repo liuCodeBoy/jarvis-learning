@@ -261,7 +261,7 @@ def test_llm_reads_claude_code_local_env_without_committing_it(tmp_path, monkeyp
     settings_dir.mkdir()
     (settings_dir / "settings.json").write_text(json.dumps({
         "env": {
-            "ANTHROPIC_AUTH_TOKEN": "local-token",
+            "ANTHROPIC_AUTH_TOKEN": "test-token",
             "ANTHROPIC_BASE_URL": "https://local.example/anthropic",
             "ANTHROPIC_MODEL": "local-model",
         }
@@ -276,7 +276,7 @@ def test_llm_reads_claude_code_local_env_without_committing_it(tmp_path, monkeyp
     client = LLMConfig()
 
     assert client.available is True
-    assert client.api_key == "local-token"
+    assert client.api_key == "test-token"
     assert client.base_url == "https://local.example/anthropic"
     assert client.model == "local-model"
 
