@@ -19,7 +19,6 @@ from typing import Optional
 
 _CREATE_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(.+?)\s*文件夹")
 _LOCAL_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(?:本地)?\s*文件夹\s*(?:命名为|叫做|叫|名为)?\s*[“\"']?([^\s“\"']+)")
-_PROJECT_RE = re.compile(r"(?:新建|创建|建立).*?(?:本地)?文件夹.*?(?:命名为|叫做|叫|名为)\s*[“\"']?([^\s“\"']+)")
 _DATE_MARKERS = (
     "今天几号", "今天多少号", "现在几号", "查看系统日历", "看一下系统日历",
     "今天星期几", "今天周几",
@@ -44,11 +43,6 @@ class LocalCommandResult:
 def _desktop_path() -> Path:
     configured = os.environ.get("JARVIS_DESKTOP_PATH", "").strip()
     return Path(configured).expanduser().resolve() if configured else Path.home() / "Desktop"
-
-
-def _workspace_path() -> Path:
-    configured = os.environ.get("JARVIS_WORKSPACE_PATH", "").strip()
-    return Path(configured).expanduser().resolve() if configured else _desktop_path()
 
 
 def _extract_folder_name(message: str) -> Optional[str]:
@@ -81,10 +75,6 @@ class LocalCommandExecutor:
     """Dispatch explicitly supported natural-language local commands."""
 
     def execute(self, message: str) -> Optional[LocalCommandResult]:
-        if "html" in message.lower() and "陀螺" in message:
-            return self._create_spinner_project(message)
-        if any(word in message for word in ("修改", "更新", "重写")) and "tes" in message.lower():
-            return self._update_spinner_project(message)
         name = _extract_folder_name(message)
         if name is not None:
             return self._create_folder(name)
@@ -94,68 +84,6 @@ class LocalCommandExecutor:
         if any(marker in message for marker in _DATE_MARKERS):
             return self._current_date()
         return None
-
-    @staticmethod
-    def _create_spinner_project(message: str) -> LocalCommandResult:
-        match = _PROJECT_RE.search(message)
-        if not match:
-            return LocalCommandResult(
-                "create_html_project", "请提供项目文件夹名称，例如“新建本地文件夹命名为 tes”。", False
-            )
-        name = match.group(1).strip(_QUOTES)
-        validation_error = _validate_folder_name(name)
-        if validation_error:
-            return LocalCommandResult("create_html_project", validation_error, False)
-
-        root = _workspace_path()
-        project = root / name
-        html_path = project / "index.html"
-        html = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>旋转陀螺</title><style>
-html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#101820;color:#fff;font-family:system-ui}
-.scene{width:240px;height:240px;display:grid;place-items:center;perspective:700px}.gyro{width:130px;height:130px;position:relative;transform-style:preserve-3d;animation:spin 1.2s linear infinite}
-.ring{position:absolute;inset:0;border:10px solid #47d7ff;border-left-color:#ff4d8d;border-radius:50%;box-shadow:0 0 30px #47d7ff88;transform:rotateX(62deg)}
-.ring:after{content:"";position:absolute;inset:22px;border:5px solid #fff6;border-radius:50%}.pin{position:absolute;left:calc(50% - 5px);top:-28px;width:10px;height:190px;background:linear-gradient(#fff,#47d7ff,#ff4d8d);border-radius:8px}
-@keyframes spin{to{transform:rotateY(360deg) rotateX(8deg)}}
-</style></head><body><main class="scene" aria-label="旋转陀螺"><div class="gyro"><div class="ring"></div><div class="pin"></div></div></main></body></html>
-"""
-        try:
-            project.mkdir(parents=True, exist_ok=True)
-            with html_path.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(html)
-            if not html_path.is_file() or html_path.stat().st_size == 0:
-                return LocalCommandResult("create_html_project", "HTML 文件校验失败，未确认生成成功。", False)
-            opened = False
-            if any(word in message for word in ("运行", "展示", "打开")):
-                try:
-                    subprocess.run(["open", str(html_path)], check=True, timeout=8)
-                    opened = True
-                except (OSError, subprocess.SubprocessError) as exc:
-                    logger.warning("Unable to open generated HTML: %s", exc)
-            status = "并已在浏览器打开" if opened else "，请打开 index.html 查看"
-            return LocalCommandResult(
-                "create_html_project", f"已创建项目并生成：{html_path}{status}。", True
-            )
-        except PermissionError:
-            return LocalCommandResult("create_html_project", f"没有写入目录权限：{root}。", False)
-        except OSError as exc:
-            logger.warning("HTML project creation failed path=%s errno=%s", project, exc.errno)
-            return LocalCommandResult("create_html_project", f"项目创建失败：{project}。", False)
-
-    @staticmethod
-    def _update_spinner_project(message: str) -> LocalCommandResult:
-        project = _workspace_path() / "tes"
-        html_path = project / "index.html"
-        if not project.is_dir():
-            return LocalCommandResult("update_html_project", f"项目目录不存在：{project}。", False)
-        if not html_path.is_file():
-            return LocalCommandResult("update_html_project", f"HTML 文件不存在：{html_path}。", False)
-        # Reuse the same controlled template generator for deterministic updates.
-        result = LocalCommandExecutor._create_spinner_project("新建本地文件夹命名为tes，写一个旋转的陀螺的html")
-        if result.executed:
-            return LocalCommandResult("update_html_project", f"已更新：{html_path}。", True)
-        return LocalCommandResult("update_html_project", f"更新失败：{html_path}。", False)
 
     @staticmethod
     def is_local_action_request(message: str) -> bool:
