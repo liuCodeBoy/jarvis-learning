@@ -645,6 +645,9 @@ def test_face_animation_is_connected_to_text_and_voice_output(client):
     app_script = client.get("/static/js/app.js").get_data(as_text=True)
 
     assert "_deformMouth" in face_script
+    assert "_buildEyes" not in face_script
+    assert "depthWrite: true" in face_script
+    assert "new THREE.EdgesGeometry" in face_script
     assert "data-mouth-open" not in face_script
     assert "dataset.mouthOpen" in face_script
     assert "face.setSpeechCharacter" in app_script

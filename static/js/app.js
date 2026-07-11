@@ -244,6 +244,7 @@
         }
         body.textContent = "";
         var cursor = 0;
+        var speechStartedAt = window.performance.now();
         try {
             while (cursor < text.length && operationId === machine.operationId) {
                 var naturalSize = /[\u3000-\u9fff]/.test(text[cursor]) ? 2 : 4;
@@ -260,6 +261,14 @@
             }
             if (cursor < text.length) {
                 body.textContent = text;
+            }
+            var remainingSpeechTime = 420 - (
+                window.performance.now() - speechStartedAt
+            );
+            if (remainingSpeechTime > 0 && operationId === machine.operationId) {
+                await new Promise(function (resolve) {
+                    window.setTimeout(resolve, remainingSpeechTime);
+                });
             }
         } finally {
             if (face) {
