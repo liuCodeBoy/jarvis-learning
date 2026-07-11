@@ -19,7 +19,7 @@ from typing import Optional
 
 _CREATE_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(.+?)\s*文件夹")
 _LOCAL_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(?:本地)?\s*文件夹\s*(?:命名为|叫做|叫|名为)?\s*[“\"']?([^\s“\"']+)")
-_PROJECT_RE = re.compile(r"(?:新建|创建|建立).*?(?:本地)?文件夹.*?(?:命名为|叫做|叫|名为)\s*[“\"']?([^\s“\"'，。,。；;]+)")
+_PROJECT_RE = re.compile(r"(?:新建|创建|建立).*?(?:本地)?文件夹.*?(?:命名为|叫做|叫|名为)\s*[“\"']?([^\s“\"']+)")
 _DATE_MARKERS = (
     "今天几号", "今天多少号", "现在几号", "查看系统日历", "看一下系统日历",
     "今天星期几", "今天周几",
@@ -133,10 +133,6 @@ html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#
                     opened = True
                 except (OSError, subprocess.SubprocessError) as exc:
                     logger.warning("Unable to open generated HTML: %s", exc)
-            if any(word in message for word in ("运行", "展示", "打开")) and not opened:
-                return LocalCommandResult(
-                    "create_html_project", f"HTML 已生成但浏览器启动失败：{html_path}。", False
-                )
             status = "并已在浏览器打开" if opened else "，请打开 index.html 查看"
             return LocalCommandResult(
                 "create_html_project", f"已创建项目并生成：{html_path}{status}。", True
