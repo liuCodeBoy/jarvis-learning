@@ -30,6 +30,7 @@ from jarvis.core.llm import LLMConfig, LLM_ERROR_PREFIX, get_llm
 from jarvis.database.schema import LearningDatabaseSchema
 from jarvis.learning.skills import SkillMatcher, SkillStore
 from jarvis.memory.bridge import MemoryBridge, get_memory_bridge
+from jarvis.tools.local_commands import LocalCommandExecutor
 
 
 logger = logging.getLogger(__name__)
@@ -360,6 +361,23 @@ def _process_chat(path: Path, session_id: str, user_namespace: str,
         interaction_id = cursor.lastrowid
 
     bridge: MemoryBridge = current_app.extensions["memory_bridge"]
+    local_result = current_app.extensions["local_command_executor"].execute(message)
+    if local_result is not None:
+        with _db_connect(path) as connection:
+            connection.execute(
+                "UPDATE interactions SET agent_response = ? WHERE id = ?",
+                (local_result.message, interaction_id),
+            )
+        return _ok({
+            "response": local_result.message,
+            "session_id": session_id,
+            "interaction_id": interaction_id,
+            "execution": {
+                "operation": local_result.operation,
+                "executed": local_result.executed,
+            },
+        })
+
     memory_context = None
     try:
         relevant = bridge.retrieve_relevant(
@@ -503,6 +521,7 @@ def create_app(test_config: Optional[Dict[str, Any]] = None,
         LLM_CONFIGURED.set(1 if _llm_available(client) else 0)
     app.extensions["llm"] = client
     app.extensions["memory_bridge"] = get_memory_bridge(str(db_path), llm=client)
+    app.extensions["local_command_executor"] = LocalCommandExecutor()
     app.extensions["skill_store"] = skill_store
     app.extensions["skill_matcher"] = SkillMatcher(skill_store)
     app.extensions["rate_limiter"] = RateLimiter()

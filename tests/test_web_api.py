@@ -99,6 +99,32 @@ def test_chat_contract_uses_http_errors_and_safe_json(client):
     assert response.content_type == "application/json"
 
 
+def test_chat_executes_supported_local_folder_command(tmp_path, monkeypatch):
+    desktop = tmp_path / "Desktop"
+    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
+    app = web_module.create_app(
+        {
+            "TESTING": True,
+            "JARVIS_DB_PATH": tmp_path / "local-command.db",
+        },
+        llm_client=FakeLLM(),
+    )
+    client = app.test_client()
+    session_id = create_session(client)
+
+    response = client.post("/api/chat", json={
+        "session_id": session_id,
+        "message": "帮我在桌面新建一个强强命名的文件夹",
+    })
+
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["execution"] == {
+        "operation": "create_folder",
+        "executed": True,
+    }
+    assert "已在桌面创建文件夹" in data["response"]
+    assert (desktop / "强强").is_dir()
 def test_model_exception_removes_pending_interaction(tmp_path):
     class RaisingLLM(FakeLLM):
         @staticmethod

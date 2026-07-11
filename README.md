@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. 自学习助手
 
-基于 Flask、SQLite 和 Anthropic Messages API 的本地智能助手。系统包含分层记忆、行为模式学习、技能沉淀和 Prompt 进化，并通过 Three.js 全息人脸反馈当前认知状态。
+基于 Flask、SQLite 和 Anthropic Messages API 的本地智能助手。系统包含分层记忆、行为模式学习、技能沉淀、受控本机工具和 Prompt 进化，并通过 Three.js 全息人脸反馈当前认知状态。
 
 ## 界面状态
 
@@ -151,5 +151,6 @@ jarvis_learning/
 - 自动挖掘的 Skill 默认禁用，需要审核后启用。
 - 助手回复只有在用户明确标记“有用”后才成为进化参考样本。
 - API 包含输入大小限制、频率限制、来源检查和安全响应头。
+- 当前本机工具只开放明确的桌面文件夹创建操作；不执行任意 Shell，不允许路径穿越，也不会覆盖已有目录。
 
 更多设计背景见 [ARCHITECTURE.md](ARCHITECTURE.md)，部署说明见 [DEPLOY.md](DEPLOY.md)。
