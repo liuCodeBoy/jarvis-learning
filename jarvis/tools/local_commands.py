@@ -46,6 +46,11 @@ def _desktop_path() -> Path:
     return Path(configured).expanduser().resolve() if configured else Path.home() / "Desktop"
 
 
+def _workspace_path() -> Path:
+    configured = os.environ.get("JARVIS_WORKSPACE_PATH", "").strip()
+    return Path(configured).expanduser().resolve() if configured else _desktop_path()
+
+
 def _extract_folder_name(message: str) -> Optional[str]:
     normalized = " ".join(message.strip().split())
     if "桌面" not in normalized or "文件夹" not in normalized:
@@ -78,6 +83,8 @@ class LocalCommandExecutor:
     def execute(self, message: str) -> Optional[LocalCommandResult]:
         if "html" in message.lower() and "陀螺" in message:
             return self._create_spinner_project(message)
+        if any(word in message for word in ("修改", "更新", "重写")) and "tes" in message.lower():
+            return self._update_spinner_project(message)
         name = _extract_folder_name(message)
         if name is not None:
             return self._create_folder(name)
@@ -100,7 +107,7 @@ class LocalCommandExecutor:
         if validation_error:
             return LocalCommandResult("create_html_project", validation_error, False)
 
-        root = _desktop_path() if "桌面" in message else Path.cwd()
+        root = _workspace_path()
         project = root / name
         html_path = project / "index.html"
         html = """<!doctype html>
@@ -114,7 +121,7 @@ html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#
 </style></head><body><main class="scene" aria-label="旋转陀螺"><div class="gyro"><div class="ring"></div><div class="pin"></div></div></main></body></html>
 """
         try:
-            project.mkdir(parents=True, exist_ok=False)
+            project.mkdir(parents=True, exist_ok=True)
             with html_path.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(html)
             if not html_path.is_file() or html_path.stat().st_size == 0:
@@ -134,13 +141,25 @@ html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#
             return LocalCommandResult(
                 "create_html_project", f"已创建项目并生成：{html_path}{status}。", True
             )
-        except FileExistsError:
-            return LocalCommandResult("create_html_project", f"项目目录已存在，未覆盖：{project}。", False)
         except PermissionError:
             return LocalCommandResult("create_html_project", f"没有写入目录权限：{root}。", False)
         except OSError as exc:
             logger.warning("HTML project creation failed path=%s errno=%s", project, exc.errno)
             return LocalCommandResult("create_html_project", f"项目创建失败：{project}。", False)
+
+    @staticmethod
+    def _update_spinner_project(message: str) -> LocalCommandResult:
+        project = _workspace_path() / "tes"
+        html_path = project / "index.html"
+        if not project.is_dir():
+            return LocalCommandResult("update_html_project", f"项目目录不存在：{project}。", False)
+        if not html_path.is_file():
+            return LocalCommandResult("update_html_project", f"HTML 文件不存在：{html_path}。", False)
+        # Reuse the same controlled template generator for deterministic updates.
+        result = LocalCommandExecutor._create_spinner_project("新建本地文件夹命名为tes，写一个旋转的陀螺的html")
+        if result.executed:
+            return LocalCommandResult("update_html_project", f"已更新：{html_path}。", True)
+        return LocalCommandResult("update_html_project", f"更新失败：{html_path}。", False)
 
     @staticmethod
     def is_local_action_request(message: str) -> bool:
