@@ -396,6 +396,25 @@ def _process_chat(path: Path, session_id: str, user_namespace: str,
             },
         })
 
+    # Do not send unsupported side-effect requests to the model: it cannot
+    # access the host filesystem and must never claim that an action happened.
+    if LocalCommandExecutor.is_local_action_request(message):
+        unsupported = (
+            "这项本地操作尚未执行。当前仅支持在明确授权的桌面路径新建文件夹，"
+            "以及查询系统日期；不会虚构文件、网页或程序已创建/运行。"
+        )
+        with _db_connect(path) as connection:
+            connection.execute(
+                "UPDATE interactions SET agent_response = ? WHERE id = ?",
+                (unsupported, interaction_id),
+            )
+        return _ok({
+            "response": unsupported,
+            "session_id": session_id,
+            "interaction_id": interaction_id,
+            "execution": {"operation": "unsupported_local_action", "executed": False},
+        })
+
     if not _llm_available(client):
         with _db_connect(path) as connection:
             connection.execute(

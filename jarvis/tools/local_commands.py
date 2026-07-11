@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import logging
+import subprocess
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,9 +18,13 @@ from typing import Optional
 
 
 _CREATE_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(.+?)\s*文件夹")
+_LOCAL_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(?:本地)?\s*文件夹\s*(?:命名为|叫做|叫|名为)?\s*[“\"']?([^\s“\"']+)")
 _DATE_MARKERS = (
     "今天几号", "今天多少号", "现在几号", "查看系统日历", "看一下系统日历",
     "今天星期几", "今天周几",
+)
+_LOCAL_ACTION_MARKERS = (
+    "新建", "创建", "建立", "写入", "保存", "运行", "打开", "删除",
 )
 _QUOTES = " \t\r\n\"'“”‘’「」『』《》【】[]()（）"
 _MAX_FOLDER_NAME = 64
@@ -73,9 +78,17 @@ class LocalCommandExecutor:
         name = _extract_folder_name(message)
         if name is not None:
             return self._create_folder(name)
+        local_match = _LOCAL_FOLDER_RE.search(message)
+        if local_match:
+            return self._create_folder(local_match.group(1), root=Path.cwd())
         if any(marker in message for marker in _DATE_MARKERS):
             return self._current_date()
         return None
+
+    @staticmethod
+    def is_local_action_request(message: str) -> bool:
+        """Return whether a request asks for a side effect we must not fake."""
+        return any(marker in message for marker in _LOCAL_ACTION_MARKERS)
 
     @staticmethod
     def _current_date() -> LocalCommandResult:
@@ -88,16 +101,16 @@ class LocalCommandExecutor:
         )
 
     @staticmethod
-    def _create_folder(name: str) -> LocalCommandResult:
+    def _create_folder(name: str, root: Optional[Path] = None) -> LocalCommandResult:
 
         validation_error = _validate_folder_name(name)
         if validation_error:
             return LocalCommandResult("create_folder", validation_error, False)
 
-        desktop = _desktop_path()
-        target = desktop / name
+        root = root or _desktop_path()
+        target = root / name
         try:
-            desktop.mkdir(parents=True, exist_ok=True)
+            root.mkdir(parents=True, exist_ok=True)
             target.mkdir(exist_ok=False)
         except FileExistsError:
             return LocalCommandResult(
@@ -107,9 +120,10 @@ class LocalCommandExecutor:
             return LocalCommandResult(
                 "create_folder",
                 (
-                    f"当前运行环境没有写入桌面的权限（{desktop}）。"
-                    "请给运行终端开启“桌面与文稿文件夹”权限，"
-                    "或设置 JARVIS_DESKTOP_PATH 到可写目录后重启服务。"
+                    f"当前运行环境没有写入目录的权限（{root}）。"
+                    + ("没有写入桌面的权限。" if root == _desktop_path() else "")
+                    + "请给运行终端开启“桌面与文稿文件夹”权限，"
+                    + "或设置 JARVIS_DESKTOP_PATH 到可写目录后重启服务。"
                 ),
                 False,
             )
@@ -117,12 +131,13 @@ class LocalCommandExecutor:
             # Do not expose OS error text to the model, but retain the path
             # and errno in logs for diagnosing platform-specific failures.
             logger.warning(
-                "Local folder creation failed path=%s errno=%s", desktop, exc.errno
+                "Local folder creation failed path=%s errno=%s", root, exc.errno
             )
             return LocalCommandResult(
-                "create_folder", "无法在桌面创建文件夹，请检查桌面路径权限。", False
+                "create_folder", f"无法创建文件夹，请检查路径权限：{root}。", False
             )
 
+        prefix = "已在桌面创建文件夹" if root == _desktop_path() else "已创建文件夹"
         return LocalCommandResult(
-            "create_folder", f"已在桌面创建文件夹“{name}”。", True
+            "create_folder", f"{prefix}“{name}”，路径：{target}。", True
         )
