@@ -125,6 +125,34 @@ def test_chat_executes_supported_local_folder_command(tmp_path, monkeypatch):
     }
     assert "已在桌面创建文件夹" in data["response"]
     assert (desktop / "强强").is_dir()
+
+
+def test_local_folder_command_works_without_model_credentials(tmp_path, monkeypatch):
+    class OfflineLLM(FakeLLM):
+        available = False
+
+    desktop = tmp_path / "Desktop"
+    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
+    app = web_module.create_app(
+        {
+            "TESTING": True,
+            "JARVIS_DB_PATH": tmp_path / "offline-command.db",
+        },
+        llm_client=OfflineLLM(),
+    )
+    client = app.test_client()
+    session_id = create_session(client)
+
+    response = client.post("/api/chat", json={
+        "session_id": session_id,
+        "message": "在桌面新建一个离线测试文件夹",
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()["data"]["execution"]["executed"] is True
+    assert (desktop / "离线测试").is_dir()
+
+
 def test_model_exception_removes_pending_interaction(tmp_path):
     class RaisingLLM(FakeLLM):
         @staticmethod

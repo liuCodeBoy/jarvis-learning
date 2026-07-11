@@ -378,6 +378,17 @@ def _process_chat(path: Path, session_id: str, user_namespace: str,
             },
         })
 
+    if not _llm_available(client):
+        with _db_connect(path) as connection:
+            connection.execute(
+                "DELETE FROM interactions WHERE id = ?", (interaction_id,)
+            )
+        return _error(
+            "llm_unavailable",
+            "尚未配置模型凭据，请设置 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN",
+            503,
+        )
+
     memory_context = None
     try:
         relevant = bridge.retrieve_relevant(
@@ -699,12 +710,6 @@ def register_routes(app: Flask) -> None:
             return _error("invalid_session", "会话已失效，请刷新后重试", 401)
 
         client = current_app.extensions["llm"]
-        if not _llm_available(client):
-            return _error(
-                "llm_unavailable",
-                "尚未配置模型凭据，请设置 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN",
-                503,
-            )
 
         gate: SessionRequestGate = current_app.extensions["session_request_gate"]
         with gate.hold(session_id) as acquired:
