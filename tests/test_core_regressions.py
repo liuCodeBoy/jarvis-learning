@@ -48,6 +48,23 @@ def test_llm_uses_environment_only_and_preserves_system_messages(monkeypatch):
     assert captured["request_timeout"] == 7
 
 
+def test_auth_token_uses_bearer_header_without_api_key_header(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "provider-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+    captured = {}
+
+    def fake_post(_url, **kwargs):
+        captured.update(kwargs["headers"])
+        return FakeResponse()
+
+    monkeypatch.setattr("jarvis.core.llm.requests.post", fake_post)
+    client = LLMConfig()
+    assert client.chat_completion([{"role": "user", "content": "hello"}]) == "ok"
+    assert captured["Authorization"] == "Bearer provider-token"
+    assert "x-api-key" not in captured
+
+
 def test_llm_without_environment_has_no_secret_fallback(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)

@@ -66,10 +66,14 @@ class LLMConfig:
     def __init__(self):
         local = _load_local_llm_settings()
         # 兼容两种环境变量名：ANTHROPIC_AUTH_TOKEN（讯飞MaaS等代理）和 ANTHROPIC_API_KEY（原生Anthropic）
-        self.api_key = (
+        self.auth_token = (
             os.environ.get('ANTHROPIC_AUTH_TOKEN')
-            or os.environ.get('ANTHROPIC_API_KEY')
             or local.get('ANTHROPIC_AUTH_TOKEN')
+            or ''
+        )
+        self.api_key = (
+            self.auth_token
+            or os.environ.get('ANTHROPIC_API_KEY')
             or local.get('ANTHROPIC_API_KEY')
             or ''
         )
@@ -179,11 +183,13 @@ class LLMConfig:
                 payload["system"] = "\n\n".join(system_messages)
 
             headers = {
-                "x-api-key": self.api_key,
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {self.api_key}"
+                if self.auth_token else "",
+                "x-api-key": "" if self.auth_token else self.api_key,
                 "Content-Type": "application/json",
                 "anthropic-version": "2023-06-01"
             }
+            headers = {key: value for key, value in headers.items() if value}
 
             logger.debug(
                 "Calling model=%s messages=%d", self.model, len(claude_messages)
