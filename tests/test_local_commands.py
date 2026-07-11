@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 from jarvis.tools.local_commands import LocalCommandExecutor
 
@@ -26,6 +27,24 @@ def test_existing_folder_is_not_overwritten(tmp_path, monkeypatch):
     assert result is not None
     assert result.executed is False
     assert "已经存在" in result.message
+
+
+def test_permission_error_explains_desktop_access(tmp_path, monkeypatch):
+    desktop = tmp_path / "Desktop"
+    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
+    original_mkdir = Path.mkdir
+
+    def deny_desktop(path, *args, **kwargs):
+        if path == desktop:
+            raise PermissionError("desktop blocked")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", deny_desktop)
+    result = LocalCommandExecutor().execute("在桌面创建一个权限测试文件夹")
+
+    assert result is not None
+    assert result.executed is False
+    assert "没有写入桌面的权限" in result.message
 
 
 @pytest.mark.parametrize("message", [

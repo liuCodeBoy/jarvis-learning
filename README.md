@@ -152,5 +152,6 @@ jarvis_learning/
 - 助手回复只有在用户明确标记“有用”后才成为进化参考样本。
 - API 包含输入大小限制、频率限制、来源检查和安全响应头。
 - 当前本机工具只开放明确的桌面文件夹创建操作；不执行任意 Shell，不允许路径穿越，也不会覆盖已有目录。
+- macOS 需要给实际启动服务的终端或 Python 应用开启“桌面与文稿文件夹”权限；受限沙箱中无法写入用户桌面时，可用 `JARVIS_DESKTOP_PATH` 指向可写目录。
 
 更多设计背景见 [ARCHITECTURE.md](ARCHITECTURE.md)，部署说明见 [DEPLOY.md](DEPLOY.md)。

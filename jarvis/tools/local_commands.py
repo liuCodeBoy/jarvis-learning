@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,7 @@ from typing import Optional
 _CREATE_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(.+?)\s*文件夹")
 _QUOTES = " \t\r\n\"'“”‘’「」『』《》【】[]()（）"
 _MAX_FOLDER_NAME = 64
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -80,7 +82,22 @@ class LocalCommandExecutor:
             return LocalCommandResult(
                 "create_folder", f"桌面上的“{name}”文件夹已经存在，没有覆盖它。", False
             )
-        except OSError:
+        except PermissionError:
+            return LocalCommandResult(
+                "create_folder",
+                (
+                    f"当前运行环境没有写入桌面的权限（{desktop}）。"
+                    "请给运行终端开启“桌面与文稿文件夹”权限，"
+                    "或设置 JARVIS_DESKTOP_PATH 到可写目录后重启服务。"
+                ),
+                False,
+            )
+        except OSError as exc:
+            # Do not expose OS error text to the model, but retain the path
+            # and errno in logs for diagnosing platform-specific failures.
+            logger.warning(
+                "Local folder creation failed path=%s errno=%s", desktop, exc.errno
+            )
             return LocalCommandResult(
                 "create_folder", "无法在桌面创建文件夹，请检查桌面路径权限。", False
             )
