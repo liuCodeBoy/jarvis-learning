@@ -73,6 +73,31 @@ def test_xfyun_environment_uses_default_sonnet_model(monkeypatch):
     assert client.base_url.endswith("/anthropic")
 
 
+def test_llm_reads_claude_code_local_env_without_committing_it(tmp_path, monkeypatch):
+    settings_dir = tmp_path / ".claude"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(json.dumps({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "local-token",
+            "ANTHROPIC_BASE_URL": "https://local.example/anthropic",
+            "ANTHROPIC_MODEL": "local-model",
+        }
+    }), encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("JARVIS_DISABLE_LOCAL_CONFIG", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+
+    client = LLMConfig()
+
+    assert client.available is True
+    assert client.api_key == "local-token"
+    assert client.base_url == "https://local.example/anthropic"
+    assert client.model == "local-model"
+
+
 def test_llm_retries_respect_total_request_budget(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_TIMEOUT_SECONDS", "90")

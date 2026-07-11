@@ -86,8 +86,9 @@ export JARVIS_SKILL_MINING_ENABLED=true
 ```
 
 本机个人覆盖配置可放在 `config.local.yaml` 或 `config.local.yml`，这两个文件已被
-`.gitignore` 排除，不会随 Git 提交。模型凭据仍只从环境变量读取，不要写入 YAML、
-源码或提交历史。
+`.gitignore` 排除，不会随 Git 提交。模型凭据优先从环境变量读取；本机开发时也会
+读取 `config.local.yaml` 和 `~/.claude/settings.json` 的 `env` 字段，不要把本地
+配置提交到 Git。
 
 ## Docker
 

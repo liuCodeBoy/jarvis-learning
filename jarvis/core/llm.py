@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import requests
+import yaml
 
 
 logger = logging.getLogger(__name__)
@@ -30,18 +31,51 @@ def _number_from_env(name: str, default: float, minimum: float,
         value = converter(default)
     return max(minimum, min(maximum, value))
 
+
+def _load_local_llm_settings() -> Dict[str, Any]:
+    """Load ignored local settings and optional Claude Code env values."""
+    if os.environ.get("JARVIS_DISABLE_LOCAL_CONFIG", "").lower() in {
+        "1", "true", "yes", "on"
+    }:
+        return {}
+
+    settings: Dict[str, Any] = {}
+    yaml_path = PROJECT_DIR / "config.local.yaml"
+    if yaml_path.is_file():
+        try:
+            loaded = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            if isinstance(loaded, dict) and isinstance(loaded.get("llm"), dict):
+                settings.update(loaded["llm"])
+        except (OSError, yaml.YAMLError):
+            logger.warning("Unable to load local LLM configuration")
+
+    claude_path = Path.home() / ".claude" / "settings.json"
+    if claude_path.is_file():
+        try:
+            loaded = json.loads(claude_path.read_text(encoding="utf-8"))
+            env = loaded.get("env", {}) if isinstance(loaded, dict) else {}
+            if isinstance(env, dict):
+                settings.update(env)
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Unable to load Claude Code local settings")
+    return settings
+
 class LLMConfig:
     """LLM配置类 - 使用Claude API"""
 
     def __init__(self):
+        local = _load_local_llm_settings()
         # 兼容两种环境变量名：ANTHROPIC_AUTH_TOKEN（讯飞MaaS等代理）和 ANTHROPIC_API_KEY（原生Anthropic）
         self.api_key = (
             os.environ.get('ANTHROPIC_AUTH_TOKEN')
             or os.environ.get('ANTHROPIC_API_KEY')
+            or local.get('ANTHROPIC_AUTH_TOKEN')
+            or local.get('ANTHROPIC_API_KEY')
             or ''
         )
         self.base_url = os.environ.get(
-            'ANTHROPIC_BASE_URL', 'https://api.anthropic.com'
+            'ANTHROPIC_BASE_URL',
+            local.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'),
         ).rstrip('/')
         default_model = (
             'astron-code-latest'
@@ -51,6 +85,8 @@ class LLMConfig:
         self.model = (
             os.environ.get('ANTHROPIC_MODEL')
             or os.environ.get('ANTHROPIC_DEFAULT_SONNET_MODEL')
+            or local.get('ANTHROPIC_MODEL')
+            or local.get('ANTHROPIC_DEFAULT_SONNET_MODEL')
             or default_model
         )
         self.max_tokens = int(_number_from_env(
@@ -59,8 +95,11 @@ class LLMConfig:
         self.temperature = float(_number_from_env(
             'ANTHROPIC_TEMPERATURE', 0.7, 0.0, 1.0, float
         ))
+        timeout_default = local.get('ANTHROPIC_TIMEOUT_SECONDS', 50)
+        if 'ANTHROPIC_TIMEOUT_MS' in local:
+            timeout_default = float(local['ANTHROPIC_TIMEOUT_MS']) / 1000
         self.request_timeout = float(_number_from_env(
-            'ANTHROPIC_TIMEOUT_SECONDS', 50, 5, 90, float
+            'ANTHROPIC_TIMEOUT_SECONDS', timeout_default, 5, 90, float
         ))
         self.max_retries = int(_number_from_env(
             'ANTHROPIC_MAX_RETRIES', 2, 1, 3, int
