@@ -103,16 +103,20 @@ class LLMConfig:
         if timeout_ms is not None:
             timeout_default = float(timeout_ms) / 1000
         self.request_timeout = float(_number_from_env(
-            'ANTHROPIC_TIMEOUT_SECONDS', timeout_default, 5, 90, float
+            'ANTHROPIC_TIMEOUT_SECONDS', timeout_default, 5, 300, float
         ))
         self.max_retries = int(_number_from_env(
-            'ANTHROPIC_MAX_RETRIES', 2, 1, 3, int
+            'ANTHROPIC_MAX_RETRIES', 3, 1, 3, int
         ))
         self.retry_backoff = float(_number_from_env(
             'ANTHROPIC_RETRY_BACKOFF_SECONDS', 2, 0, 10, float
         ))
+        total_timeout_default = local.get(
+            'ANTHROPIC_TOTAL_TIMEOUT_SECONDS',
+            max(120, min(600, self.request_timeout * 2)),
+        )
         self.total_timeout = float(_number_from_env(
-            'ANTHROPIC_TOTAL_TIMEOUT_SECONDS', 95, 5, 100, float
+            'ANTHROPIC_TOTAL_TIMEOUT_SECONDS', total_timeout_default, 5, 600, float
         ))
         self._best_prompt_cache: Dict[str, Tuple[float, str]] = {}
         self._best_prompt_cache_lock = threading.Lock()
@@ -132,6 +136,19 @@ class LLMConfig:
     @staticmethod
     def response_is_error(value: Any) -> bool:
         return not isinstance(value, str) or value.startswith(LLM_ERROR_PREFIX)
+
+    @staticmethod
+    def _model_error_reason(value: str) -> str:
+        marker = value.removeprefix(LLM_ERROR_PREFIX).strip()
+        if marker == "total_timeout":
+            return "工具链总超时"
+        if marker.startswith("http_"):
+            return f"模型服务 HTTP {marker.removeprefix('http_')}"
+        if marker.startswith("retry_http_"):
+            return f"模型服务持续返回 HTTP {marker.removeprefix('retry_http_')}"
+        if marker.startswith("network_") or marker.startswith("retries_exhausted"):
+            return "模型服务网络请求失败"
+        return "模型服务未返回有效结果"
 
     def chat_completion(self, messages: list, temperature: Optional[float] = None,
                         tools: Optional[list] = None, tool_executor=None,
@@ -276,7 +293,9 @@ class LLMConfig:
                                     )
                                     return (
                                         f"本地工具已执行到以下步骤：{details}。"
-                                        "后续模型请求失败，任务未确认全部完成。"
+                                        "后续模型请求失败"
+                                        f"（{self._model_error_reason(nested)}），"
+                                        "任务未确认全部完成。"
                                     )
                             return nested
                         if tool_blocks:
@@ -442,7 +461,8 @@ class LLMConfig:
             f"{workspace_root()}。用户要求创建、读取、写入、修改或打开本地文件时，"
             "必须调用工具并根据工具返回的 ok 字段报告结果；没有成功的工具结果时，"
             "不得声称操作已经完成。修改已有文件时先调用 read_file 获取当前内容，"
-            "再调用 write_file 写入完整的新内容。所有路径都应位于工作区根目录内。"
+            "再调用 write_file 写入完整的新内容。write_file 会自动创建父目录，"
+            "写文件任务不需要提前调用 create_directory。所有路径都应位于工作区根目录内。"
         )
         messages = [
             {"role": "system", "content": system_prompt},

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import yaml
 MAX_TEXT_BYTES = 1_000_000
 MAX_DIRECTORY_ENTRIES = 500
 PROJECT_DIR = Path(__file__).resolve().parents[2]
+logger = logging.getLogger(__name__)
 
 
 def _configured_workspace() -> str:
@@ -109,10 +111,16 @@ TOOL_DEFINITIONS = [
 
 
 def _success(operation: str, **details: Any) -> str:
+    logger.info(
+        "Host tool completed operation=%s path=%s",
+        operation,
+        details.get("path", ""),
+    )
     return json.dumps({"ok": True, "operation": operation, **details}, ensure_ascii=False)
 
 
 def _failure(operation: str, error: str) -> str:
+    logger.warning("Host tool failed operation=%s error=%s", operation, error)
     return json.dumps(
         {"ok": False, "operation": operation, "error": error}, ensure_ascii=False
     )

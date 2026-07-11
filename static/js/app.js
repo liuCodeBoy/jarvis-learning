@@ -362,7 +362,7 @@
             var data = await api.request("/api/chat", {
                 method: "POST",
                 body: { message: message, session_id: sessionId },
-                timeout: 110000
+                timeout: 610000
             });
             pending.remove();
             var responseNode = addMessage(
