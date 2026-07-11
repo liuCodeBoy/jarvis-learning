@@ -96,8 +96,9 @@ class LLMConfig:
             'ANTHROPIC_TEMPERATURE', 0.7, 0.0, 1.0, float
         ))
         timeout_default = local.get('ANTHROPIC_TIMEOUT_SECONDS', 50)
-        if 'ANTHROPIC_TIMEOUT_MS' in local:
-            timeout_default = float(local['ANTHROPIC_TIMEOUT_MS']) / 1000
+        timeout_ms = local.get('ANTHROPIC_TIMEOUT_MS', local.get('API_TIMEOUT_MS'))
+        if timeout_ms is not None:
+            timeout_default = float(timeout_ms) / 1000
         self.request_timeout = float(_number_from_env(
             'ANTHROPIC_TIMEOUT_SECONDS', timeout_default, 5, 90, float
         ))
