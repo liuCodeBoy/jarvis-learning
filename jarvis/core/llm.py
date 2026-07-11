@@ -66,20 +66,21 @@ class LLMConfig:
     def __init__(self):
         local = _load_local_llm_settings()
         # 兼容两种环境变量名：ANTHROPIC_AUTH_TOKEN（讯飞MaaS等代理）和 ANTHROPIC_API_KEY（原生Anthropic）
-        self.auth_token = (
-            os.environ.get('ANTHROPIC_AUTH_TOKEN')
-            or local.get('ANTHROPIC_AUTH_TOKEN')
-            or ''
-        )
+        env_auth_token = os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
+        local_auth_token = local.get('ANTHROPIC_AUTH_TOKEN', '')
+        self.auth_token = env_auth_token or local_auth_token or ''
+        # Keep a token, endpoint, and model from the same provider together.
+        # This prevents a stale ANTHROPIC_BASE_URL/API_KEY in the shell from
+        # overriding the working Claude/讯飞 settings loaded from disk.
+        settings_source = os.environ if env_auth_token else local
         self.api_key = (
             self.auth_token
             or os.environ.get('ANTHROPIC_API_KEY')
             or local.get('ANTHROPIC_API_KEY')
             or ''
         )
-        self.base_url = os.environ.get(
-            'ANTHROPIC_BASE_URL',
-            local.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'),
+        self.base_url = settings_source.get(
+            'ANTHROPIC_BASE_URL', 'https://api.anthropic.com'
         ).rstrip('/')
         default_model = (
             'astron-code-latest'
@@ -87,10 +88,8 @@ class LLMConfig:
             else 'claude-sonnet-4-5-20250929'
         )
         self.model = (
-            os.environ.get('ANTHROPIC_MODEL')
-            or os.environ.get('ANTHROPIC_DEFAULT_SONNET_MODEL')
-            or local.get('ANTHROPIC_MODEL')
-            or local.get('ANTHROPIC_DEFAULT_SONNET_MODEL')
+            settings_source.get('ANTHROPIC_MODEL')
+            or settings_source.get('ANTHROPIC_DEFAULT_SONNET_MODEL')
             or default_model
         )
         self.max_tokens = int(_number_from_env(
