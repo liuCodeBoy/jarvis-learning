@@ -135,7 +135,8 @@ class LLMConfig:
 
     def chat_completion(self, messages: list, temperature: Optional[float] = None,
                         tools: Optional[list] = None, tool_executor=None,
-                        _tool_depth: int = 0) -> str:
+                        _tool_depth: int = 0,
+                        _tool_trace: Optional[list] = None) -> str:
         """
         调用Claude API进行对话
 
@@ -164,7 +165,10 @@ class LLMConfig:
                     continue
                 if role not in ('user', 'assistant') or not content:
                     continue
-                claude_messages.append({"role": role, "content": content if isinstance(content, list) else str(content)})
+                claude_messages.append({
+                    "role": role,
+                    "content": content if isinstance(content, list) else str(content),
+                })
 
             if not claude_messages:
                 return f"{LLM_ERROR_PREFIX} no_messages"
@@ -224,19 +228,57 @@ class LLMConfig:
 
                     if response.status_code == 200:
                         result = response.json()
-                        tool_blocks = [b for b in result.get("content", []) if b.get("type") == "tool_use"]
+                        tool_blocks = [
+                            block
+                            for block in result.get("content", [])
+                            if block.get("type") == "tool_use"
+                        ]
                         if tool_blocks and tools and tool_executor and _tool_depth < 8:
                             tool_results = []
+                            trace = list(_tool_trace or [])
                             for block in tool_blocks:
-                                output = tool_executor(block.get("name", ""), block.get("input") or {})
-                                tool_results.append({"type": "tool_result", "tool_use_id": block.get("id", ""), "content": output})
-                            return self.chat_completion(
+                                output = tool_executor(
+                                    block.get("name", ""),
+                                    block.get("input") or {},
+                                )
+                                try:
+                                    trace.append(json.loads(output))
+                                except (TypeError, json.JSONDecodeError):
+                                    trace.append({
+                                        "ok": False,
+                                        "operation": block.get("name", "unknown"),
+                                        "error": "tool returned an invalid result",
+                                    })
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": block.get("id", ""),
+                                    "content": output,
+                                })
+                            nested = self.chat_completion(
                                 messages + [
-                                    {"role": "assistant", "content": result.get("content", [])},
+                                    {
+                                        "role": "assistant",
+                                        "content": result.get("content", []),
+                                    },
                                     {"role": "user", "content": tool_results},
                                 ], temperature=temperature, tools=tools,
                                 tool_executor=tool_executor, _tool_depth=_tool_depth + 1,
+                                _tool_trace=trace,
                             )
+                            if self.response_is_error(nested):
+                                completed = [item for item in trace if item.get("ok")]
+                                if completed:
+                                    details = "；".join(
+                                        f"{item.get('operation')}：{item.get('path', '已执行')}"
+                                        for item in completed
+                                    )
+                                    return (
+                                        f"本地工具已执行到以下步骤：{details}。"
+                                        "后续模型请求失败，任务未确认全部完成。"
+                                    )
+                            return nested
+                        if tool_blocks:
+                            return f"{LLM_ERROR_PREFIX} tool_loop_limit"
                         text_blocks = [
                             block.get('text', '')
                             for block in result.get('content', [])
@@ -244,13 +286,22 @@ class LLMConfig:
                         ]
                         content = ''.join(text_blocks).strip()
                         if content:
+                            failures = [
+                                item for item in (_tool_trace or []) if not item.get("ok")
+                            ]
+                            if failures:
+                                details = "；".join(
+                                    f"{item.get('operation')}：{item.get('error', '执行失败')}"
+                                    for item in failures
+                                )
+                                return f"本地操作未完全成功：{details}。"
                             return content
                         logger.warning("Model response contained no text blocks")
                         return f"{LLM_ERROR_PREFIX} empty_response"
 
                     # 5xx 或 429 可重试；4xx 其他立即返回
                     if (
-                        response.status_code in (429, 502, 503, 504)
+                        response.status_code in (429, 500, 502, 503, 504)
                         and attempt < self.max_retries
                     ):
                         last_status = response.status_code
@@ -374,7 +425,27 @@ class LLMConfig:
                          history: Optional[list] = None,
                          context: Optional[str] = None) -> str:
         """Run a conversation with a trusted prompt and untrusted context data."""
-        messages = [{"role": "system", "content": system_prompt}]
+        try:
+            from jarvis.tools.host_tools import (
+                TOOL_DEFINITIONS,
+                execute,
+                workspace_root,
+            )
+        except ImportError:
+            logger.exception("Host tool setup failed")
+            return f"{LLM_ERROR_PREFIX} tool_setup_failed"
+
+        tool_prompt = (
+            "你可以使用本地工具完成文件系统操作。工作区根目录是："
+            f"{workspace_root()}。用户要求创建、读取、写入、修改或打开本地文件时，"
+            "必须调用工具并根据工具返回的 ok 字段报告结果；没有成功的工具结果时，"
+            "不得声称操作已经完成。修改已有文件时先调用 read_file 获取当前内容，"
+            "再调用 write_file 写入完整的新内容。所有路径都应位于工作区根目录内。"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": tool_prompt},
+        ]
 
         if history:
             for h in history:
@@ -387,12 +458,11 @@ class LLMConfig:
             "role": "user",
             "content": self._user_message_with_context(user_message, context),
         })
-        try:
-            from jarvis.tools.host_tools import TOOL_DEFINITIONS, execute
-            return self.chat_completion(messages, tools=TOOL_DEFINITIONS, tool_executor=execute)
-        except Exception:
-            logger.exception("Host tool setup failed; falling back to text completion")
-            return self.chat_completion(messages)
+        return self.chat_completion(
+            messages,
+            tools=TOOL_DEFINITIONS,
+            tool_executor=execute,
+        )
 
     @staticmethod
     def _user_message_with_context(user_message: str,

@@ -1,68 +1,89 @@
-import pytest
+import json
 from pathlib import Path
 
+import pytest
+
+from jarvis.tools.host_tools import execute
 from jarvis.tools.local_commands import LocalCommandExecutor
 
 
-def test_create_folder_command_is_scoped_to_desktop(tmp_path, monkeypatch):
-    desktop = tmp_path / "Desktop"
-    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
-
-    result = LocalCommandExecutor().execute("帮我在桌面新建一个强强命名的文件夹")
-
-    assert result is not None
-    assert result.operation == "create_folder"
-    assert result.executed is True
-    assert (desktop / "强强").is_dir()
+def _result(name, arguments):
+    return json.loads(execute(name, arguments))
 
 
-def test_existing_folder_is_not_overwritten(tmp_path, monkeypatch):
-    desktop = tmp_path / "Desktop"
-    desktop.mkdir()
-    (desktop / "强强").mkdir()
-    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
+def test_create_write_read_and_list_workspace_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(tmp_path))
 
-    result = LocalCommandExecutor().execute("在桌面创建一个强强文件夹")
+    created = _result("create_directory", {"path": "tes"})
+    written = _result(
+        "write_file", {"path": "tes/index.html", "content": "<h1>updated</h1>"}
+    )
+    read = _result("read_file", {"path": "tes/index.html"})
+    listed = _result("list_directory", {"path": "tes"})
 
-    assert result is not None
-    assert result.executed is False
-    assert "已经存在" in result.message
-
-
-def test_permission_error_explains_desktop_access(tmp_path, monkeypatch):
-    desktop = tmp_path / "Desktop"
-    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
-    original_mkdir = Path.mkdir
-
-    def deny_desktop(path, *args, **kwargs):
-        if path == desktop:
-            raise PermissionError("desktop blocked")
-        return original_mkdir(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "mkdir", deny_desktop)
-    result = LocalCommandExecutor().execute("在桌面创建一个权限测试文件夹")
-
-    assert result is not None
-    assert result.executed is False
-    assert "没有写入桌面的权限" in result.message
+    assert created["ok"] is True
+    assert written["ok"] is True
+    assert written["bytes"] == len("<h1>updated</h1>")
+    assert read["content"] == "<h1>updated</h1>"
+    assert listed["entries"] == [{"name": "index.html", "type": "file"}]
 
 
-@pytest.mark.parametrize("message", [
-    "帮我在桌面新建一个../secret文件夹",
-    "帮我在桌面新建一个foo/bar文件夹",
-])
-def test_folder_command_rejects_path_traversal(tmp_path, monkeypatch, message):
-    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(tmp_path / "Desktop"))
+def test_write_file_updates_existing_content(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(tmp_path))
+    target = tmp_path / "tes" / "index.html"
 
-    result = LocalCommandExecutor().execute(message)
+    assert _result("write_file", {"path": "tes/index.html", "content": "first"})["ok"]
+    assert _result("write_file", {"path": "tes/index.html", "content": "second"})["ok"]
 
-    assert result is not None
-    assert result.executed is False
-    assert "路径分隔符" in result.message
+    assert target.read_text(encoding="utf-8") == "second"
+
+
+@pytest.mark.parametrize("path", ["../secret", "/tmp/outside", "tes/../../outside"])
+def test_tools_reject_paths_outside_workspace(tmp_path, monkeypatch, path):
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(tmp_path))
+
+    result = _result("write_file", {"path": path, "content": "blocked"})
+
+    assert result["ok"] is False
+    assert "outside" in result["error"]
+
+
+def test_tools_reject_symlink_escape(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(workspace))
+
+    result = _result("write_file", {"path": "link/secret.txt", "content": "blocked"})
+
+    assert result["ok"] is False
+    assert "outside" in result["error"]
+    assert not (outside / "secret.txt").exists()
+
+
+def test_open_file_reports_real_process_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(tmp_path))
+    target = tmp_path / "index.html"
+    target.write_text("ok", encoding="utf-8")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr("jarvis.tools.host_tools.subprocess.run", fake_run)
+
+    result = _result("open_file", {"path": "index.html"})
+
+    assert result["ok"] is True
+    assert calls == [(["open", str(target)], {"check": True, "timeout": 10})]
 
 
 def test_unrecognized_message_is_left_for_the_model():
-    assert LocalCommandExecutor().execute("帮我总结这段文字") is None
+    executor = LocalCommandExecutor()
+    assert executor.execute("帮我在桌面创建一个文件夹") is None
+    assert executor.execute("帮我总结这段文字") is None
 
 
 def test_current_date_command_does_not_require_model_or_filesystem():

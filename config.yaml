@@ -19,3 +19,7 @@ learning:
   # newly mined Skills start disabled.
   skill_mining:
     enabled: false
+
+tools:
+  # Model file tools are restricted to this directory and its descendants.
+  workspace_path: "~/Desktop"

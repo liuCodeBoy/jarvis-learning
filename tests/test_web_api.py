@@ -99,9 +99,9 @@ def test_chat_contract_uses_http_errors_and_safe_json(client):
     assert response.content_type == "application/json"
 
 
-def test_chat_executes_supported_local_folder_command(tmp_path, monkeypatch):
-    desktop = tmp_path / "Desktop"
-    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
+def test_filesystem_request_is_routed_to_tool_capable_model(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(workspace))
     app = web_module.create_app(
         {
             "TESTING": True,
@@ -118,21 +118,16 @@ def test_chat_executes_supported_local_folder_command(tmp_path, monkeypatch):
     })
 
     assert response.status_code == 200
-    data = response.get_json()["data"]
-    assert data["execution"] == {
-        "operation": "create_folder",
-        "executed": True,
-    }
-    assert "已在桌面创建文件夹" in data["response"]
-    assert (desktop / "强强").is_dir()
+    assert response.get_json()["data"]["response"].endswith("safe text")
+    assert not workspace.exists()
 
 
-def test_local_folder_command_works_without_model_credentials(tmp_path, monkeypatch):
+def test_filesystem_request_requires_model_credentials(tmp_path, monkeypatch):
     class OfflineLLM(FakeLLM):
         available = False
 
-    desktop = tmp_path / "Desktop"
-    monkeypatch.setenv("JARVIS_DESKTOP_PATH", str(desktop))
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(workspace))
     app = web_module.create_app(
         {
             "TESTING": True,
@@ -148,9 +143,9 @@ def test_local_folder_command_works_without_model_credentials(tmp_path, monkeypa
         "message": "在桌面新建一个离线测试文件夹",
     })
 
-    assert response.status_code == 200
-    assert response.get_json()["data"]["execution"]["executed"] is True
-    assert (desktop / "离线测试").is_dir()
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "llm_unavailable"
+    assert not workspace.exists()
 
 
 def test_model_exception_removes_pending_interaction(tmp_path):

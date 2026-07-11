@@ -22,6 +22,16 @@ class FakeResponse:
         return {"content": [{"type": "text", "text": "ok"}]}
 
 
+class JsonResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self):
+        return self._payload
+
+
 def test_llm_uses_environment_only_and_preserves_system_messages(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
@@ -63,6 +73,124 @@ def test_auth_token_uses_bearer_header_without_api_key_header(monkeypatch):
     assert client.chat_completion([{"role": "user", "content": "hello"}]) == "ok"
     assert captured["Authorization"] == "Bearer provider-token"
     assert "x-api-key" not in captured
+
+
+def test_anthropic_tool_use_executes_and_returns_result(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "1")
+    responses = iter([
+        JsonResponse(200, {"content": [{
+            "type": "tool_use",
+            "id": "tool-1",
+            "name": "write_file",
+            "input": {"path": "tes/index.html", "content": "hello"},
+        }]}),
+        JsonResponse(200, {"content": [{"type": "text", "text": "完成"}]}),
+    ])
+    payloads = []
+
+    def fake_post(_url, **kwargs):
+        payloads.append(kwargs["json"])
+        return next(responses)
+
+    tool_calls = []
+
+    def fake_execute(name, arguments):
+        tool_calls.append((name, arguments))
+        return json.dumps({"ok": True, "operation": name, "path": arguments["path"]})
+
+    monkeypatch.setattr("jarvis.core.llm.requests.post", fake_post)
+    client = LLMConfig()
+    result = client.chat_completion(
+        [{"role": "user", "content": "write it"}],
+        tools=[{"name": "write_file", "input_schema": {"type": "object"}}],
+        tool_executor=fake_execute,
+    )
+
+    assert result == "完成"
+    assert tool_calls == [("write_file", {"path": "tes/index.html", "content": "hello"})]
+    assert payloads[1]["messages"][-1]["content"][0] == {
+        "type": "tool_result",
+        "tool_use_id": "tool-1",
+        "content": json.dumps({
+            "ok": True,
+            "operation": "write_file",
+            "path": "tes/index.html",
+        }),
+    }
+
+
+def test_tool_failure_cannot_be_reported_as_success(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "1")
+    responses = iter([
+        JsonResponse(200, {"content": [{
+            "type": "tool_use", "id": "tool-1", "name": "open_file",
+            "input": {"path": "missing.html"},
+        }]}),
+        JsonResponse(200, {"content": [{"type": "text", "text": "已经打开"}]}),
+    ])
+    monkeypatch.setattr(
+        "jarvis.core.llm.requests.post", lambda *_args, **_kwargs: next(responses)
+    )
+    client = LLMConfig()
+
+    result = client.chat_completion(
+        [{"role": "user", "content": "open it"}],
+        tools=[{"name": "open_file", "input_schema": {"type": "object"}}],
+        tool_executor=lambda *_args: json.dumps({
+            "ok": False, "operation": "open_file", "error": "file not found"
+        }),
+    )
+
+    assert result == "本地操作未完全成功：open_file：file not found。"
+
+
+def test_provider_http_500_is_retried_for_tool_round_trips(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "2")
+    monkeypatch.setenv("ANTHROPIC_RETRY_BACKOFF_SECONDS", "0.01")
+    responses = iter([
+        JsonResponse(500, {"error": {"message": "temporary gateway failure"}}),
+        JsonResponse(200, {"content": [{"type": "text", "text": "recovered"}]}),
+    ])
+    calls = []
+
+    def fake_post(*_args, **_kwargs):
+        calls.append(True)
+        return next(responses)
+
+    monkeypatch.setattr("jarvis.core.llm.requests.post", fake_post)
+
+    result = LLMConfig().chat_completion([{"role": "user", "content": "hello"}])
+
+    assert result == "recovered"
+    assert len(calls) == 2
+
+
+def test_chat_with_prompt_exposes_generic_host_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("JARVIS_WORKSPACE_PATH", str(tmp_path))
+    client = LLMConfig()
+    captured = {}
+
+    def fake_completion(messages, **kwargs):
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(client, "chat_completion", fake_completion)
+
+    assert client.chat_with_prompt("创建页面", "trusted prompt") == "ok"
+    assert str(tmp_path) in captured["messages"][1]["content"]
+    assert {tool["name"] for tool in captured["tools"]} == {
+        "list_directory",
+        "read_file",
+        "create_directory",
+        "write_file",
+        "open_file",
+    }
+    assert callable(captured["tool_executor"])
 
 
 def test_llm_without_environment_has_no_secret_fallback(monkeypatch):
