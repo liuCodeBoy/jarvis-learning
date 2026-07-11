@@ -63,3 +63,12 @@ def test_folder_command_rejects_path_traversal(tmp_path, monkeypatch, message):
 
 def test_unrecognized_message_is_left_for_the_model():
     assert LocalCommandExecutor().execute("帮我总结这段文字") is None
+
+
+def test_current_date_command_does_not_require_model_or_filesystem():
+    result = LocalCommandExecutor().execute("看一下系统日历，今天几号")
+
+    assert result is not None
+    assert result.operation == "get_current_date"
+    assert result.executed is True
+    assert "今天是" in result.message

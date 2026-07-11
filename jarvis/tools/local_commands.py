@@ -10,12 +10,17 @@ from __future__ import annotations
 import os
 import re
 import logging
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 
 _CREATE_FOLDER_RE = re.compile(r"(?:新建|创建|建立)\s*(?:一个|个)?\s*(.+?)\s*文件夹")
+_DATE_MARKERS = (
+    "今天几号", "今天多少号", "现在几号", "查看系统日历", "看一下系统日历",
+    "今天星期几", "今天周几",
+)
 _QUOTES = " \t\r\n\"'“”‘’「」『』《》【】[]()（）"
 _MAX_FOLDER_NAME = 64
 logger = logging.getLogger(__name__)
@@ -66,8 +71,24 @@ class LocalCommandExecutor:
 
     def execute(self, message: str) -> Optional[LocalCommandResult]:
         name = _extract_folder_name(message)
-        if name is None:
-            return None
+        if name is not None:
+            return self._create_folder(name)
+        if any(marker in message for marker in _DATE_MARKERS):
+            return self._current_date()
+        return None
+
+    @staticmethod
+    def _current_date() -> LocalCommandResult:
+        now = datetime.now()
+        weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+        return LocalCommandResult(
+            "get_current_date",
+            f"今天是 {now.year}年{now.month}月{now.day}日，{weekdays[now.weekday()]}。",
+            True,
+        )
+
+    @staticmethod
+    def _create_folder(name: str) -> LocalCommandResult:
 
         validation_error = _validate_folder_name(name)
         if validation_error:
