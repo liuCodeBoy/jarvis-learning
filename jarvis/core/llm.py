@@ -133,7 +133,9 @@ class LLMConfig:
     def response_is_error(value: Any) -> bool:
         return not isinstance(value, str) or value.startswith(LLM_ERROR_PREFIX)
 
-    def chat_completion(self, messages: list, temperature: Optional[float] = None) -> str:
+    def chat_completion(self, messages: list, temperature: Optional[float] = None,
+                        tools: Optional[list] = None, tool_executor=None,
+                        _tool_depth: int = 0) -> str:
         """
         调用Claude API进行对话
 
@@ -162,7 +164,7 @@ class LLMConfig:
                     continue
                 if role not in ('user', 'assistant') or not content:
                     continue
-                claude_messages.append({"role": role, "content": str(content)})
+                claude_messages.append({"role": role, "content": content if isinstance(content, list) else str(content)})
 
             if not claude_messages:
                 return f"{LLM_ERROR_PREFIX} no_messages"
@@ -180,6 +182,8 @@ class LLMConfig:
 
             if system_messages:
                 payload["system"] = "\n\n".join(system_messages)
+            if tools:
+                payload["tools"] = tools
 
             headers = {
                 "Authorization": f"Bearer {self.api_key}"
@@ -220,6 +224,19 @@ class LLMConfig:
 
                     if response.status_code == 200:
                         result = response.json()
+                        tool_blocks = [b for b in result.get("content", []) if b.get("type") == "tool_use"]
+                        if tool_blocks and tools and tool_executor and _tool_depth < 8:
+                            tool_results = []
+                            for block in tool_blocks:
+                                output = tool_executor(block.get("name", ""), block.get("input") or {})
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.get("id", ""), "content": output})
+                            return self.chat_completion(
+                                messages + [
+                                    {"role": "assistant", "content": result.get("content", [])},
+                                    {"role": "user", "content": tool_results},
+                                ], temperature=temperature, tools=tools,
+                                tool_executor=tool_executor, _tool_depth=_tool_depth + 1,
+                            )
                         text_blocks = [
                             block.get('text', '')
                             for block in result.get('content', [])
@@ -370,7 +387,12 @@ class LLMConfig:
             "role": "user",
             "content": self._user_message_with_context(user_message, context),
         })
-        return self.chat_completion(messages)
+        try:
+            from jarvis.tools.host_tools import TOOL_DEFINITIONS, execute
+            return self.chat_completion(messages, tools=TOOL_DEFINITIONS, tool_executor=execute)
+        except Exception:
+            logger.exception("Host tool setup failed; falling back to text completion")
+            return self.chat_completion(messages)
 
     @staticmethod
     def _user_message_with_context(user_message: str,
