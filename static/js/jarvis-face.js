@@ -2,12 +2,12 @@
     "use strict";
 
     var STATE_STYLE = {
-        idle: { color: 0x66ddd8, tilt: 0, opacity: 0.1 },
-        listening: { color: 0x9ce8bd, tilt: -0.018, opacity: 0.15 },
-        thinking: { color: 0xffca61, tilt: 0.014, opacity: 0.13 },
-        speaking: { color: 0x66ddd8, tilt: 0, opacity: 0.17 },
-        executing: { color: 0x9ce8bd, tilt: 0, opacity: 0.15 },
-        error: { color: 0xff7373, tilt: 0, opacity: 0.19 }
+        idle: { color: 0x66ddd8, tilt: 0, opacity: 0.14 },
+        listening: { color: 0x9ce8bd, tilt: -0.018, opacity: 0.2 },
+        thinking: { color: 0xffca61, tilt: 0.014, opacity: 0.18 },
+        speaking: { color: 0x66ddd8, tilt: 0, opacity: 0.24 },
+        executing: { color: 0x9ce8bd, tilt: 0, opacity: 0.2 },
+        error: { color: 0xff7373, tilt: 0, opacity: 0.26 }
     };
 
     function clamp(value, minimum, maximum) {
@@ -17,6 +17,33 @@
     function smoothstep(minimum, maximum, value) {
         var normalized = clamp((value - minimum) / (maximum - minimum), 0, 1);
         return normalized * normalized * (3 - 2 * normalized);
+    }
+
+    function visemeForCharacter(character) {
+        var value = String(character || " ");
+        if (/\s|[，。！？；：,.!?;:]/.test(value)) {
+            return { open: 0.015, width: 1 };
+        }
+        if (/[bmp]/i.test(value)) {
+            return { open: 0.025, width: 1.02 };
+        }
+        if (/[o0]/i.test(value)) {
+            return { open: 0.3, width: 0.76 };
+        }
+        if (/[u]/i.test(value)) {
+            return { open: 0.2, width: 0.72 };
+        }
+        if (/[ae]/i.test(value)) {
+            return { open: 0.44, width: 1.02 };
+        }
+        if (/[iy]/i.test(value)) {
+            return { open: 0.18, width: 1.14 };
+        }
+        var code = value.charCodeAt(0) || 32;
+        return {
+            open: 0.2 + (code % 5) * 0.055,
+            width: 0.86 + (code % 5) * 0.065
+        };
     }
 
     function JarvisFace(canvas) {
@@ -98,14 +125,6 @@
             polygonOffsetFactor: 1,
             polygonOffsetUnits: 1
         });
-        this.edgeMaterial = new THREE.LineBasicMaterial({
-            color: 0x9ce8e3,
-            transparent: true,
-            opacity: 0.3,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-            depthTest: true
-        });
         this._buildLoadingMesh();
         this._buildMouthRig();
         this._loadHeadModel();
@@ -138,17 +157,17 @@
 
     JarvisFace.prototype._buildMouthRig = function () {
         this.mouthRig = new THREE.Group();
-        this.mouthRig.position.set(0, -0.25, 2.23);
+        this.mouthRig.position.set(0, 0.2, 2.25);
         this.mouthRig.visible = false;
 
         var shape = new THREE.Shape();
-        shape.absellipse(0, 0, 0.66, 0.15, 0, Math.PI * 2, false, 0);
+        shape.absellipse(0, 0, 0.58, 0.11, 0, Math.PI * 2, false, 0);
         this.mouthCavity = new THREE.Mesh(
             new THREE.ShapeGeometry(shape, 28),
             new THREE.MeshBasicMaterial({
                 color: 0x010507,
                 transparent: true,
-                opacity: 0.94,
+                opacity: 0,
                 depthWrite: false,
                 depthTest: false,
                 side: THREE.DoubleSide
@@ -157,27 +176,7 @@
         this.mouthCavity.scale.y = 0.04;
         this.mouthCavity.renderOrder = 5;
 
-        var lipShape = new THREE.Shape();
-        lipShape.absellipse(0, 0, 0.72, 0.19, 0, Math.PI * 2, false, 0);
-        var lipHole = new THREE.Path();
-        lipHole.absellipse(0, 0, 0.64, 0.12, 0, Math.PI * 2, true, 0);
-        lipShape.holes.push(lipHole);
-        this.lipRim = new THREE.Mesh(
-            new THREE.ShapeGeometry(lipShape, 28),
-            new THREE.MeshBasicMaterial({
-                color: 0x66ddd8,
-                transparent: true,
-                opacity: 0.28,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false,
-                depthTest: false,
-                side: THREE.DoubleSide
-            })
-        );
-        this.lipRim.position.z = 0.014;
-        this.lipRim.scale.y = 0.04;
-        this.lipRim.renderOrder = 6;
-        this.mouthRig.add(this.mouthCavity, this.lipRim);
+        this.mouthRig.add(this.mouthCavity);
         this.modelRoot.add(this.mouthRig);
     };
 
@@ -205,17 +204,11 @@
 
             self.surfaceMesh = new THREE.Mesh(geometry, self.surfaceMaterial);
             self.wireMesh = new THREE.Mesh(geometry, self.wireMaterial);
-            self.edgeLines = new THREE.LineSegments(
-                new THREE.EdgesGeometry(geometry, 12),
-                self.edgeMaterial
-            );
             self.surfaceMesh.renderOrder = 1;
             self.wireMesh.renderOrder = 2;
-            self.edgeLines.renderOrder = 3;
             self.modelRoot.add(
                 self.surfaceMesh,
-                self.wireMesh,
-                self.edgeLines
+                self.wireMesh
             );
 
             self.loadingMesh.visible = false;
@@ -251,15 +244,10 @@
     };
 
     JarvisFace.prototype.setSpeechCharacter = function (character) {
-        var value = String(character || " ");
-        var code = value.charCodeAt(0) || 32;
-        if (/\s|[，。！？；：,.!?;:]/.test(value)) {
-            this.speechImpulse = 0.015;
-            this.speechWidth = 1.02;
-            return;
-        }
-        this.speechImpulse = 0.18 + (code % 4) * 0.065;
-        this.speechWidth = 0.94 + (code % 3) * 0.04;
+        var viseme = visemeForCharacter(character);
+        this.speechManual = true;
+        this.speechImpulse = viseme.open;
+        this.speechWidth = viseme.width;
     };
 
     JarvisFace.prototype.stopSpeaking = function () {
@@ -318,14 +306,7 @@
         var character = this.speechText.charAt(
             Math.floor(progress * 8.5) % this.speechText.length
         );
-        var code = character.charCodeAt(0) || 32;
-        if (/\s|[，。！？；：,.!?;:]/.test(character)) {
-            return { open: 0.015, width: 1.02 };
-        }
-        return {
-            open: 0.18 + (code % 4) * 0.065,
-            width: 0.94 + (code % 3) * 0.04
-        };
+        return visemeForCharacter(character);
     };
 
     JarvisFace.prototype._deformMouth = function (openAmount, widthAmount) {
@@ -341,22 +322,22 @@
             var x = base[offset];
             var y = base[offset + 1];
             var z = base[offset + 2];
-            var frontWeight = smoothstep(1.25, 2.08, z);
+            var frontWeight = smoothstep(1.35, 2.15, z);
             var mouthX = 1 - smoothstep(0.62, 1.34, Math.abs(x));
-            var mouthY = 1 - smoothstep(0.1, 0.3, Math.abs(y + 0.25));
+            var mouthY = 1 - smoothstep(0.12, 0.34, Math.abs(y - 0.2));
             var mouthWeight = frontWeight * mouthX * mouthY;
-            var lowerLip = smoothstep(-0.24, -0.48, y);
+            var lowerLip = smoothstep(0.2, -0.08, y);
             var upperLip = 1 - lowerLip;
             var jawWeight = frontWeight
-                * smoothstep(-0.18, -1.75, y)
+                * smoothstep(0.14, -1.25, y)
                 * (1 - smoothstep(1.35, 2.7, Math.abs(x)));
 
             array[offset] = x * (1 + (widthAmount - 1) * mouthWeight * 0.22);
             array[offset + 1] = y
-                - openAmount * mouthWeight * lowerLip * 0.15
-                + openAmount * mouthWeight * upperLip * 0.025
-                - openAmount * jawWeight * 0.05;
-            array[offset + 2] = z + openAmount * mouthWeight * 0.012;
+                - openAmount * mouthWeight * lowerLip * 0.32
+                + openAmount * mouthWeight * upperLip * 0.06
+                - openAmount * jawWeight * 0.12;
+            array[offset + 2] = z + openAmount * mouthWeight * 0.02;
         }
         attribute.needsUpdate = true;
     };
@@ -383,14 +364,9 @@
         var surfaceColor = targetColor.clone().multiplyScalar(0.12);
 
         this.wireMaterial.color.lerp(targetColor, lerp * 0.6);
-        this.edgeMaterial.color.lerp(targetColor, lerp * 0.48);
-        this.lipRim.material.color.lerp(targetColor, lerp * 0.5);
         this.surfaceMaterial.color.lerp(surfaceColor, lerp * 0.16);
         this.wireMaterial.opacity += (
             style.opacity - this.wireMaterial.opacity
-        ) * lerp;
-        this.edgeMaterial.opacity += (
-            0.25 + style.opacity * 0.42 - this.edgeMaterial.opacity
         ) * lerp;
 
         if (this.speechManual) {
@@ -409,17 +385,15 @@
         );
         this._deformMouth(this.currentMouthOpen, speech.width);
         this.mouthCavity.scale.y += (
-            0.04 + this.currentMouthOpen * 3.2 - this.mouthCavity.scale.y
+            0.04 + this.currentMouthOpen * 2.3 - this.mouthCavity.scale.y
         ) * Math.min(1, delta * 14);
         this.mouthCavity.scale.x += (
             speech.width - this.mouthCavity.scale.x
         ) * lerp;
-        this.lipRim.scale.y += (
-            0.04 + this.currentMouthOpen * 3.2 - this.lipRim.scale.y
-        ) * Math.min(1, delta * 14);
-        this.lipRim.scale.x += (
-            speech.width - this.lipRim.scale.x
-        ) * lerp;
+        this.mouthCavity.material.opacity += (
+            clamp(this.currentMouthOpen * 2.6, 0, 0.9)
+                - this.mouthCavity.material.opacity
+        ) * Math.min(1, delta * 18);
         this.canvas.dataset.mouthOpen = this.currentMouthOpen.toFixed(3);
 
         var drift = this.reducedMotion

@@ -354,6 +354,11 @@
                         face.startSpeaking(chunk, false);
                     }
                 };
+                utterance.onboundary = function (event) {
+                    if (face && Number.isFinite(event.charIndex)) {
+                        face.setSpeechCharacter(chunk.charAt(event.charIndex));
+                    }
+                };
                 utterance.onend = function () {
                     window.clearTimeout(watchdog);
                     watchdog = null;

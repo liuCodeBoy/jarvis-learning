@@ -647,11 +647,16 @@ def test_face_animation_is_connected_to_text_and_voice_output(client):
     assert "_deformMouth" in face_script
     assert "_buildEyes" not in face_script
     assert "depthWrite: true" in face_script
-    assert "new THREE.EdgesGeometry" in face_script
+    assert "wireframe: true" in face_script
+    assert "new THREE.EdgesGeometry" not in face_script
+    assert "visemeForCharacter" in face_script
+    assert "mouthRig.position.set(0, 0.2, 2.25)" in face_script
+    assert "lipRim" not in face_script
     assert "data-mouth-open" not in face_script
     assert "dataset.mouthOpen" in face_script
     assert "face.setSpeechCharacter" in app_script
     assert "face.startSpeaking(chunk, false)" in app_script
+    assert "utterance.onboundary" in app_script
     assert "face.stopSpeaking()" in app_script
 
 
