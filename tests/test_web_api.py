@@ -627,11 +627,29 @@ def test_skill_metric_failure_does_not_drop_generated_response(client, monkeypat
     assert stored == "skill response"
 
 
-def test_index_uses_human_face_assets_not_wave_markup(client):
+def test_index_uses_scanned_human_face_assets_not_wave_markup(client):
     html = client.get("/").get_data(as_text=True)
     assert 'id="face-canvas"' in html
     assert "jarvis-face.js" in html
+    assert "GLTFLoader.js" in html
+    assert "LeePerrySmith.glb" in html
     assert "audioWaveData" not in html
+
+    model = client.get("/static/models/lee-perry-smith/LeePerrySmith.glb")
+    assert model.status_code == 200
+    assert model.data[:4] == b"glTF"
+
+
+def test_face_animation_is_connected_to_text_and_voice_output(client):
+    face_script = client.get("/static/js/jarvis-face.js").get_data(as_text=True)
+    app_script = client.get("/static/js/app.js").get_data(as_text=True)
+
+    assert "_deformMouth" in face_script
+    assert "data-mouth-open" not in face_script
+    assert "dataset.mouthOpen" in face_script
+    assert "face.setSpeechCharacter" in app_script
+    assert "face.startSpeaking(chunk, false)" in app_script
+    assert "face.stopSpeaking()" in app_script
 
 
 def test_frontend_speech_chunks_full_responses(client):

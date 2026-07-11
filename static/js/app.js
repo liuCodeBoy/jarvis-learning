@@ -232,22 +232,39 @@
     async function typeResponse(messageElement, text, operationId) {
         var body = messageElement.querySelector(".message-body");
         var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (face) {
+            face.startSpeaking(text, true);
+        }
         if (reduced || text.length > 5000) {
             body.textContent = text;
+            if (face) {
+                face.stopSpeaking();
+            }
             return;
         }
         body.textContent = "";
         var cursor = 0;
-        while (cursor < text.length && operationId === machine.operationId) {
-            var naturalSize = /[\u3000-\u9fff]/.test(text[cursor]) ? 2 : 4;
-            var size = Math.max(naturalSize, Math.ceil(text.length / 180));
-            cursor = Math.min(text.length, cursor + size);
-            body.textContent = text.slice(0, cursor);
-            elements.messages.scrollTop = elements.messages.scrollHeight;
-            await new Promise(function (resolve) { window.setTimeout(resolve, 14); });
-        }
-        if (cursor < text.length) {
-            body.textContent = text;
+        try {
+            while (cursor < text.length && operationId === machine.operationId) {
+                var naturalSize = /[\u3000-\u9fff]/.test(text[cursor]) ? 2 : 4;
+                var size = Math.max(naturalSize, Math.ceil(text.length / 180));
+                cursor = Math.min(text.length, cursor + size);
+                body.textContent = text.slice(0, cursor);
+                if (face) {
+                    face.setSpeechCharacter(text.charAt(Math.max(0, cursor - 1)));
+                }
+                elements.messages.scrollTop = elements.messages.scrollHeight;
+                await new Promise(function (resolve) {
+                    window.setTimeout(resolve, 14);
+                });
+            }
+            if (cursor < text.length) {
+                body.textContent = text;
+            }
+        } finally {
+            if (face) {
+                face.stopSpeaking();
+            }
         }
     }
 
@@ -303,6 +320,9 @@
                 if (watchdog) {
                     window.clearTimeout(watchdog);
                 }
+                if (face) {
+                    face.stopSpeaking();
+                }
                 resolve(spoke);
             }
             function speakNext() {
@@ -321,10 +341,16 @@
                 utterance.pitch = 0.92;
                 utterance.onstart = function () {
                     machine.set("speaking", { operationId: operationId });
+                    if (face) {
+                        face.startSpeaking(chunk, false);
+                    }
                 };
                 utterance.onend = function () {
                     window.clearTimeout(watchdog);
                     watchdog = null;
+                    if (face) {
+                        face.stopSpeaking();
+                    }
                     index += 1;
                     speakNext();
                 };
@@ -354,6 +380,9 @@
             }
             if (window.speechSynthesis) {
                 window.speechSynthesis.cancel();
+            }
+            if (face) {
+                face.stopSpeaking();
             }
             addMessage("user", message, false);
             elements["user-input"].value = "";
@@ -886,6 +915,9 @@
             window.localStorage.setItem("jarvis.voiceEnabled", String(voiceEnabled));
             if (!voiceEnabled && window.speechSynthesis) {
                 window.speechSynthesis.cancel();
+            }
+            if (!voiceEnabled && face) {
+                face.stopSpeaking();
             }
             updateVoiceButton();
         });
