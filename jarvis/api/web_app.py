@@ -171,18 +171,36 @@ def _int_setting(name: str, default: int, minimum: int, maximum: int) -> int:
 
 def _load_project_config() -> Dict[str, Any]:
     configured = os.environ.get("JARVIS_CONFIG_PATH")
-    path = Path(configured).expanduser() if configured else PROJECT_DIR / "config.yaml"
-    if not path.is_absolute():
-        path = (PROJECT_DIR / path).resolve()
-    if not path.exists():
-        return {}
-    try:
-        with path.open("r", encoding="utf-8") as stream:
-            loaded = yaml.safe_load(stream)
-        return loaded if isinstance(loaded, dict) else {}
-    except (OSError, yaml.YAMLError):
-        logger.exception("Unable to load project configuration from %s", path)
-        return {}
+    if configured:
+        paths = [Path(configured).expanduser()]
+    else:
+        paths = [PROJECT_DIR / "config.yaml", PROJECT_DIR / "config.local.yaml"]
+
+    merged: Dict[str, Any] = {}
+    for path in paths:
+        if not path.is_absolute():
+            path = (PROJECT_DIR / path).resolve()
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                loaded = yaml.safe_load(stream)
+            if isinstance(loaded, dict):
+                merged = _merge_config(merged, loaded)
+        except (OSError, yaml.YAMLError):
+            logger.exception("Unable to load project configuration from %s", path)
+    return merged
+
+
+def _merge_config(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge local overrides without mutating the base config."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _db_connect(path: Path) -> sqlite3.Connection:

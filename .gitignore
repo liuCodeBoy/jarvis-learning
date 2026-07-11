@@ -18,6 +18,10 @@ logs/*.log
 *.secret
 *.key
 
+# Local runtime overrides (keep personal model/learning settings out of Git)
+config.local.yaml
+config.local.yml
+
 # Node modules (frontend deps if any)
 node_modules/
 
