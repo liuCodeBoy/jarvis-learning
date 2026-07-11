@@ -136,7 +136,8 @@ class LLMConfig:
     def chat_completion(self, messages: list, temperature: Optional[float] = None,
                         tools: Optional[list] = None, tool_executor=None,
                         _tool_depth: int = 0,
-                        _tool_trace: Optional[list] = None) -> str:
+                        _tool_trace: Optional[list] = None,
+                        _deadline: Optional[float] = None) -> str:
         """
         调用Claude API进行对话
 
@@ -208,7 +209,7 @@ class LLMConfig:
             # 重试配置：网关 503/限流 429/网络抖动时退避重试，4xx 鉴权/参数错误立即返回
             last_error_text = ""
             last_status = 0
-            deadline = time.monotonic() + self.total_timeout
+            deadline = _deadline or (time.monotonic() + self.total_timeout)
 
             for attempt in range(1, self.max_retries + 1):
                 remaining = deadline - time.monotonic()
@@ -264,6 +265,7 @@ class LLMConfig:
                                 ], temperature=temperature, tools=tools,
                                 tool_executor=tool_executor, _tool_depth=_tool_depth + 1,
                                 _tool_trace=trace,
+                                _deadline=deadline,
                             )
                             if self.response_is_error(nested):
                                 completed = [item for item in trace if item.get("ok")]

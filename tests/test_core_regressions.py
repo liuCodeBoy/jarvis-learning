@@ -193,6 +193,44 @@ def test_chat_with_prompt_exposes_generic_host_tools(tmp_path, monkeypatch):
     assert callable(captured["tool_executor"])
 
 
+def test_tool_round_trips_share_one_total_timeout(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("ANTHROPIC_TOTAL_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "1")
+    clock = [0.0]
+    request_timeouts = []
+    responses = iter([
+        JsonResponse(200, {"content": [{
+            "type": "tool_use",
+            "id": "tool-1",
+            "name": "create_directory",
+            "input": {"path": "tes"},
+        }]}),
+        JsonResponse(200, {"content": [{"type": "text", "text": "done"}]}),
+    ])
+
+    def fake_post(*_args, **kwargs):
+        request_timeouts.append(kwargs["timeout"])
+        if len(request_timeouts) == 1:
+            clock[0] = 90.0
+        return next(responses)
+
+    monkeypatch.setattr("jarvis.core.llm.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("jarvis.core.llm.requests.post", fake_post)
+
+    result = LLMConfig().chat_completion(
+        [{"role": "user", "content": "create it"}],
+        tools=[{"name": "create_directory", "input_schema": {"type": "object"}}],
+        tool_executor=lambda *_args: json.dumps({
+            "ok": True, "operation": "create_directory", "path": "tes"
+        }),
+    )
+
+    assert result == "done"
+    assert request_timeouts == pytest.approx([90, 10])
+
+
 def test_llm_without_environment_has_no_secret_fallback(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
