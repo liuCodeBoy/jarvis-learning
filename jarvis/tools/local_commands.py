@@ -81,7 +81,7 @@ class LocalCommandExecutor:
     """Dispatch explicitly supported natural-language local commands."""
 
     def execute(self, message: str) -> Optional[LocalCommandResult]:
-        if "html" in message.lower() and "陀螺" in message:
+        if "html" in message.lower() and any(word in message for word in ("陀螺", "旋转", "动画")):
             return self._create_spinner_project(message)
         if any(word in message for word in ("修改", "更新", "重写")) and "tes" in message.lower():
             return self._update_spinner_project(message)
@@ -98,11 +98,11 @@ class LocalCommandExecutor:
     @staticmethod
     def _create_spinner_project(message: str) -> LocalCommandResult:
         match = _PROJECT_RE.search(message)
-        if not match:
-            return LocalCommandResult(
-                "create_html_project", "请提供项目文件夹名称，例如“新建本地文件夹命名为 tes”。", False
-            )
-        name = match.group(1).strip(_QUOTES)
+        if match:
+            name = match.group(1).strip(_QUOTES)
+        else:
+            folder_match = re.search(r"(?:桌面|本地).*?([A-Za-z0-9_-]+)\s*文件夹", message, re.IGNORECASE)
+            name = folder_match.group(1) if folder_match else "tes"
         validation_error = _validate_folder_name(name)
         if validation_error:
             return LocalCommandResult("create_html_project", validation_error, False)
