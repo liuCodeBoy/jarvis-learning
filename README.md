@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. 自学习助手
 
-基于 Flask、SQLite 和 Anthropic Messages API 的本地智能助手。系统包含分层记忆、行为模式学习、技能沉淀、受控本机工具和 Prompt 进化，并通过 Three.js 极简低多边形网格脸反馈当前认知状态。启用 Azure Speech 后，嘴型由与合成音频同源的 viseme 时间轴驱动。
+基于 Flask、SQLite 和 Anthropic Messages API 的本地智能助手。系统包含分层记忆、行为模式学习、技能沉淀、受控本机工具和 Prompt 进化，并通过 Three.js 分片式机械面甲反馈当前认知状态。模型回答经 SSE/NDJSON 流式输出；启用 Azure Speech 后，文字、口周甲片和铰接下颌由同一音频时钟推进。
 
 ## 界面状态
 
@@ -9,9 +9,9 @@
 | 状态 | 反馈 |
 |---|---|
 | `idle` | 中性表情、自然眨眼和轻微视线跟随 |
-| `listening` | 眼睛张开、虹膜增强，麦克风音量驱动反馈 |
-| `thinking` | 视线上移、眉部收紧、扫描速度提高 |
-| `speaking` | 播放器按音频时钟消费 22 类标准 viseme，驱动嘴部形状 |
+| `listening` | 眼睛张开，瞳孔由麦克风音量驱动 |
+| `thinking` | 视线上移，面罩切换为琥珀色并轻微倾斜 |
+| `speaking` | 播放器按音频时钟消费 22 类标准 viseme，驱动刚性口周甲片和铰接下颌 |
 | `executing` | 专注表情，用于学习、检索和数据操作 |
 | `error` | 红色面部反馈并自动恢复待命 |
 
@@ -90,22 +90,28 @@ export JARVIS_SKILL_MINING_ENABLED=true
 读取 `config.local.yaml` 和 `~/.claude/settings.json` 的 `env` 字段，不要把本地
 配置提交到 Git。
 
-## 精确语音与口型
+## 流式语音与口型
 
 浏览器 `SpeechSynthesisUtterance` 不提供音素或 viseme，只提供词/句边界，因此不能
-用于可靠的中文口型同步。本项目改为由后端调用 Azure Speech SDK，并在同一次请求中
-取得 PCM WAV 音频、22 类 viseme ID 和音频 offset；前端以 `AudioContext.currentTime`
-为唯一时钟调度嘴型。未配置服务时不会播放假同步动画。
+用于可靠的中文口型同步。本项目把模型 SSE 转为 NDJSON 增量文本，前端按标点组成短句并
+预取 TTS。播放开始后，前端以 `AudioContext.currentTime` 同时推进该句文字和刚性甲片
+口型。`auto` 模式优先使用 Azure 返回的 22 类精确 viseme；没有 Azure 密钥时使用
+Edge TTS，并直接分析实际播放音频的能量和频谱来驱动甲片，不按文字猜口型。两种服务都
+不可用时，文字仍直接流式显示，但不会制造假语音或假口型。
 
 在被 Git 忽略的 `config.local.yaml` 中加入自己的 Azure Speech 资源信息：
 
 ```yaml
 voice:
-  provider: "azure"
+  provider: "auto"
   azure:
     key: "your-azure-speech-key"
     region: "your-resource-region"
     voice: "zh-CN-YunxiNeural"
+  edge:
+    voice: "zh-CN-YunxiNeural"
+    rate: "+0%"
+    pitch: "+0Hz"
 ```
 
 也可以使用环境变量：
@@ -116,8 +122,10 @@ export AZURE_SPEECH_REGION='your-resource-region'
 export AZURE_SPEECH_VOICE='zh-CN-YunxiNeural'
 ```
 
-`ANTHROPIC_AUTH_TOKEN` 只能调用语言模型，不能代替 Azure Speech 凭据。修改后重启
-服务，`GET /api/status` 中的 `speech.available` 应为 `true`。完整选型依据见
+`ANTHROPIC_AUTH_TOKEN` 只能调用语言模型，不能代替 Azure Speech 凭据。默认 `auto`
+会在 Azure 未配置时使用无需密钥但仍需联网的 Edge TTS；设置
+`JARVIS_VOICE_PROVIDER=azure` 可强制只使用精确 Azure viseme。修改后重启服务，
+`GET /api/status` 中的 `speech.available` 应为 `true`。完整选型依据见
 [语音口型与人脸方案](docs/voice-face-options.md)。
 
 ## Docker

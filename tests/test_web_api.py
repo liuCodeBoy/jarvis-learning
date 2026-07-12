@@ -1,4 +1,5 @@
 import base64
+import json
 import sqlite3
 import stat
 import threading
@@ -7,7 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import jarvis.api.web_app as web_module
-from jarvis.voice import SpeechSynthesisError, SpeechSynthesisResult
+from jarvis.voice import (
+    SpeechSynthesisError,
+    SpeechSynthesisResult,
+    UnavailableSpeechSynthesizer,
+)
 
 
 class FakeLLM:
@@ -72,6 +77,9 @@ def client(tmp_path, monkeypatch):
             "JARVIS_BACKUP_DIR": tmp_path / "backups",
         },
         llm_client=FakeLLM(),
+        speech_synthesizer=UnavailableSpeechSynthesizer(
+            "azure", "尚未配置 AZURE_SPEECH_KEY"
+        ),
     )
     return app.test_client()
 
@@ -99,6 +107,38 @@ def test_fresh_app_health_status_and_security_headers(client):
     assert stat.S_IMODE(client.application.config["JARVIS_DB_PATH"].stat().st_mode) == 0o600
 
 
+def test_auto_speech_prefers_azure_then_audio_reactive_edge(monkeypatch):
+    class FakeAzure:
+        provider = "azure"
+        reason = "azure unavailable"
+
+        def __init__(self, **_kwargs):
+            self.available = FakeAzure.is_available
+
+    class FakeEdge:
+        provider = "edge"
+        available = True
+        reason = ""
+
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(web_module, "AzureSpeechSynthesizer", FakeAzure)
+    monkeypatch.setattr(web_module, "EdgeSpeechSynthesizer", FakeEdge)
+
+    FakeAzure.is_available = True
+    selected = web_module._create_speech_synthesizer({
+        "voice": {"provider": "auto"}
+    })
+    assert selected.provider == "azure"
+
+    FakeAzure.is_available = False
+    selected = web_module._create_speech_synthesizer({
+        "voice": {"provider": "auto"}
+    })
+    assert selected.provider == "edge"
+
+
 def test_online_backup_uses_private_permissions(client):
     response = client.post("/api/backup")
     assert response.status_code == 201
@@ -124,6 +164,66 @@ def test_chat_contract_uses_http_errors_and_safe_json(client):
     assert response.status_code == 200
     assert response.get_json()["data"]["response"].startswith("<img")
     assert response.content_type == "application/json"
+
+
+def test_chat_stream_flushes_deltas_and_holds_session_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_module, "_post_chat_tasks", lambda *args: None)
+
+    class StreamingLLM(FakeLLM):
+        @staticmethod
+        def chat_with_memory_stream(*_args, **_kwargs):
+            yield {"type": "delta", "text": "流式"}
+            yield {"type": "delta", "text": "回答"}
+
+    app = web_module.create_app(
+        {
+            "TESTING": True,
+            "JARVIS_DB_PATH": tmp_path / "stream.db",
+            "JARVIS_BACKUP_DIR": tmp_path / "backups",
+        },
+        llm_client=StreamingLLM(),
+    )
+    first_client = app.test_client()
+    second_client = app.test_client()
+    session_id = create_session(first_client)
+
+    response = first_client.post("/api/chat/stream", json={
+        "session_id": session_id,
+        "message": "hello",
+    }, buffered=False)
+    chunks = iter(response.response)
+    start = json.loads(next(chunks))
+
+    assert response.content_type == "application/x-ndjson; charset=utf-8"
+    assert response.headers["X-Accel-Buffering"] == "no"
+    assert start["type"] == "start"
+    assert start["session_id"] == session_id
+
+    overlap = second_client.post("/api/chat/stream", json={
+        "session_id": session_id,
+        "message": "second",
+    })
+    assert overlap.status_code == 409
+    assert overlap.get_json()["error"]["code"] == "session_busy"
+
+    events = [json.loads(chunk) for chunk in chunks]
+    response.close()
+    assert events == [
+        {"type": "delta", "text": "流式"},
+        {"type": "delta", "text": "回答"},
+        {
+            "type": "done",
+            "response": "流式回答",
+            "session_id": session_id,
+            "interaction_id": start["interaction_id"],
+        },
+    ]
+    with sqlite3.connect(app.config["JARVIS_DB_PATH"]) as connection:
+        stored = connection.execute(
+            "SELECT agent_response FROM interactions WHERE id = ?",
+            (start["interaction_id"],),
+        ).fetchone()[0]
+    assert stored == "流式回答"
 
 
 def test_filesystem_request_is_routed_to_tool_capable_model(tmp_path, monkeypatch):
@@ -654,13 +754,21 @@ def test_skill_metric_failure_does_not_drop_generated_response(client, monkeypat
     assert stored == "skill response"
 
 
-def test_index_uses_generated_low_poly_face_not_external_scan(client):
+def test_index_uses_generated_segmented_mask_not_external_scan(client):
     html = client.get("/").get_data(as_text=True)
+    face_script = client.get("/static/js/jarvis-face.js").get_data(as_text=True)
+
     assert 'id="face-canvas"' in html
     assert "jarvis-face.js" in html
     assert "GLTFLoader.js" not in html
     assert "LeePerrySmith.glb" not in html
     assert "audioWaveData" not in html
+    assert "function makePlate(" in face_script
+    assert "new THREE.ExtrudeGeometry" in face_script
+    assert "new THREE.EdgesGeometry" in face_script
+    assert 'faceDesign = "segmented-mask"' in face_script
+    assert 'mouthMechanism = "articulated-plates"' in face_script
+    assert "function addArticulatedPair(" in face_script
 
 
 def test_face_animation_consumes_service_visemes_on_audio_clock(client):
@@ -669,10 +777,13 @@ def test_face_animation_consumes_service_visemes_on_audio_clock(client):
 
     assert "VISEME_SHAPES" in face_script
     assert "setViseme" in face_script
-    assert "new THREE.IcosahedronGeometry(1, 3)" in face_script
     assert "depthWrite: true" in face_script
-    assert "wireframe: true" in face_script
     assert "dataset.mouthOpen" in face_script
+    assert "upperMouthRigs.forEach" in face_script
+    assert "lowerMouthRigs.forEach" in face_script
+    assert "lowerJawRig.rotation.x" in face_script
+    assert "mouthCavity" not in face_script
+    assert "makeMouthRail" not in face_script
     assert "visemeForCharacter" not in face_script
     assert "setSpeechCharacter" not in face_script
 
@@ -704,6 +815,7 @@ def test_speech_endpoint_returns_audio_and_matching_visemes(client):
         {"offset_ms": 82.5, "id": 6},
     ]
     assert data["provider"] == "test-speech"
+    assert data["viseme_source"] == "provider"
     assert synthesizer.calls == ["你好"]
 
 
@@ -756,9 +868,24 @@ def test_speech_provider_errors_are_classified(client):
     }
 
 
-def test_frontend_speech_chunks_full_responses(client):
+def test_frontend_streams_text_and_prefetches_speech_chunks(client):
     script = client.get("/static/js/app.js").get_data(as_text=True)
-    assert "splitSpeechText" in script
+    api_script = client.get("/static/js/api-client.js").get_data(as_text=True)
+
+    assert 'api.stream("/api/chat/stream"' in script
+    assert "requestChatResponse" in script
+    assert 'api.request("/api/chat"' in script
+    assert 'error.status !== 404 || error.code !== "not_found"' in script
+    assert "createSpeechStream" in script
+    assert "speechChunkBoundary" in script
+    assert "playSpeechSegment" in script
+    assert "options.onProgress" in script
+    assert 'payload.viseme_source === "audio-analysis"' in script
+    assert "analyser.getByteFrequencyData" in script
+    assert "splitSpeechText" not in script
+    assert "typeResponse" not in script
+    assert 'headers.set("Accept", "application/x-ndjson")' in api_script
+    assert "response.body.getReader()" in api_script
     assert "text.slice(0, 3000)" not in script
     learning_request = script[script.index('api.request("/api/learn"'):]
     assert "timeout: 110000" in learning_request[:180]

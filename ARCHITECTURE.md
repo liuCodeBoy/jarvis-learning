@@ -1,17 +1,17 @@
 # J.A.R.V.I.S. 架构说明
 
-版本：4.1
+版本：4.2
 
 ## 总览
 
 ```text
 Browser
   ├── explicit state machine
-  ├── Three.js low-poly mesh face
+  ├── Three.js segmented mechanical mask
   ├── Web Audio viseme scheduler
   ├── chat / learning / memory / skill views
-  └── typed API client
-             │ HTTP/JSON
+  └── typed API client + NDJSON stream reader
+             │ HTTP/JSON + NDJSON
              ▼
 Flask application factory
   ├── session and input boundary
@@ -41,7 +41,7 @@ Azure Speech (optional)
 | `static/css/app.css` | 响应式工具界面和稳定布局 |
 | `static/js/state-machine.js` | 状态、操作 ID 和过期操作隔离 |
 | `static/js/jarvis-face.js` | Three.js 人脸几何、表情和帧循环 |
-| `static/js/api-client.js` | JSON 契约、超时、认证和错误类型 |
+| `static/js/api-client.js` | JSON/NDJSON 契约、超时、取消、认证和错误类型 |
 | `static/js/app.js` | 对话、语音、模块视图与安全 DOM 渲染 |
 
 ### 人脸状态机
@@ -58,10 +58,10 @@ module action: any -> executing -> idle
 failure:       any -> error -> idle
 ```
 
-每次异步操作获得递增的 `operationId`。旧请求、旧 TTS 回调和旧定时器不能覆盖新操作状态。麦克风开启时，真实 RMS 音量输入驱动虹膜反馈；语音播报时，后端从同一次 Azure Speech 合成取得音频和 viseme offset，浏览器按 `AudioContext.currentTime` 调度口型。文本打字动画不再驱动嘴部。
+每次异步操作获得递增的 `operationId`。旧请求、旧 TTS 回调和旧定时器不能覆盖新操作状态。麦克风开启时，真实 RMS 音量输入驱动瞳孔反馈；语音播报时，模型增量文本按句进入 TTS 预取队列。Azure 可用时后端返回同源音频和 viseme offset；否则 Edge 返回语音，浏览器从正在播放的音频提取能量和频谱。两条路径都以 `AudioContext.currentTime` 同时推进当前句的文字显示和口型，文字打字速度不再独立驱动嘴部。
 系统启用 `prefers-reduced-motion` 时停止漂移和眨眼脉冲；作为内容反馈的真实 viseme 和音量输入仍保留。
 
-`JarvisFace` 只暴露 `setState`、`setAudioLevel`、`startSpeaking`、`setViseme`、`stopSpeaking`、`setWorkspaceOpen`、`resize` 和 `destroy`，业务控制器不直接操作 Three.js Mesh。头部、眼睛、眉部和嘴部均由组件在同一个局部坐标系中生成，不再加载扫描 GLB 或叠加基于未知模型坐标的嘴片。
+`JarvisFace` 只暴露 `setState`、`setAudioLevel`、`startSpeaking`、`setViseme`、`stopSpeaking`、`setWorkspaceOpen`、`resize` 和 `destroy`，业务控制器不直接操作 Three.js Mesh。带折角的核心轮廓、分离装甲板、深眼眶和铰接式口周甲片均由组件在同一个局部坐标系中生成。viseme 的开合量与宽度只驱动甲片的刚性位移、偏航、俯仰和下颌铰链；不存在独立口腔网格、嘴线图层或基于未知模型坐标的叠加嘴片。
 
 ## API 边界
 
@@ -79,7 +79,8 @@ failure:       any -> error -> idle
 
 - 新会话由 `POST /api/session` 生成 128 位随机 ID。
 - 消息、记忆键和值均有服务端长度限制。
-- `POST /api/speech` 要求有效会话，单段最多 500 字，并返回无编码延迟的 PCM WAV 与同源 viseme 时间轴。
+- `POST /api/chat/stream` 把 Anthropic SSE 转为 `start`、`delta`、`reset`、`done`、`error` NDJSON 事件；旧 `POST /api/chat` JSON 契约继续保留。
+- `POST /api/speech` 要求有效会话，单段最多 500 字；Azure 返回 PCM WAV 与同源 viseme 时间轴，Edge 后备返回 MP3 与 `audio-analysis` 标记。
 - API 错误使用对应的 4xx/5xx 状态，不把异常伪装成 HTTP 200。
 - 同一会话只允许一个模型请求在途；重叠请求返回 `409 session_busy`，避免多标签页基于同一旧历史重复付费调用。
 - 回环地址可不设令牌；所有非回环 API 都要求 `JARVIS_API_TOKEN`，避免 tokenless 本地服务遭 DNS rebinding。
@@ -99,10 +100,10 @@ failure:       any -> error -> idle
 4. 写入 pending interaction
 5. 在该会话的记忆命名空间中做本地键/关键词检索
 6. 匹配已审核且启用的 Skill
-7. 调用 LLM；若返回 `tool_use`，执行注册工具并通过 `tool_result` 继续对话
-8. 持久化 interaction 响应，再以 best-effort 更新 Skill 统计
-9. 立即返回浏览器
-10. 后台抽取事实、幂等记录待标注 eval case、检查学习触发
+7. 以 Anthropic SSE 调用 LLM，并把文本增量立即转发为 NDJSON；若返回 `tool_use`，执行注册工具并通过 `tool_result` 继续对话
+8. 浏览器按标点组成不超过 220 字的语音片段，最多预取两段 TTS
+9. 每段音频开始后，以同一个音频时钟推进可见文字和 viseme 甲片动画
+10. 完整响应持久化后发送 `done`，再以 best-effort 更新 Skill 统计并触发后台学习任务
 ```
 
 模型的主 System Prompt 与历史记忆严格区分。记忆被放入标记为“不可信数据”的用户内容块，不能覆盖 System Prompt。多个受信 System 消息按顺序合并，不再只保留最后一条。

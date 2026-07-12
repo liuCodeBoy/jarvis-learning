@@ -1,6 +1,9 @@
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
-from jarvis.voice import AzureSpeechSynthesizer
+from jarvis.voice import AzureSpeechSynthesizer, EdgeSpeechSynthesizer
 
 
 class FakeSignal:
@@ -90,3 +93,93 @@ def test_azure_speech_requires_key_and_region_without_importing_sdk():
     assert no_key.reason == "尚未配置 AZURE_SPEECH_KEY"
     assert no_region.available is False
     assert no_region.reason == "尚未配置 AZURE_SPEECH_REGION"
+
+
+def test_edge_speech_returns_audio_for_browser_side_analysis():
+    calls = []
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, **options):
+            calls.append((text, voice, options))
+
+        async def stream(self):
+            yield {"type": "audio", "data": b"first"}
+            yield {"type": "WordBoundary", "text": "你好"}
+            yield {"type": "audio", "data": b"second"}
+
+    synthesizer = EdgeSpeechSynthesizer(
+        voice="zh-CN-test", rate="+5%", pitch="-2Hz"
+    )
+    synthesizer._sdk = SimpleNamespace(Communicate=FakeCommunicate)
+
+    result = synthesizer.synthesize("你好")
+
+    assert result.audio == b"firstsecond"
+    assert result.mime_type == "audio/mpeg"
+    assert result.visemes == []
+    assert result.viseme_source == "audio-analysis"
+    assert calls == [(
+        "你好",
+        "zh-CN-test",
+        {"rate": "+5%", "pitch": "-2Hz"},
+    )]
+
+
+def test_edge_speech_retries_no_audio_failures(monkeypatch):
+    attempts = []
+    delays = []
+
+    class NoAudioReceived(RuntimeError):
+        pass
+
+    class FlakyCommunicate:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def stream(self):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise NoAudioReceived()
+            yield {"type": "audio", "data": b"recovered"}
+
+    synthesizer = EdgeSpeechSynthesizer(max_attempts=3)
+    synthesizer._sdk = SimpleNamespace(Communicate=FlakyCommunicate)
+    monkeypatch.setattr(
+        "jarvis.voice.synthesis.time.sleep", delays.append
+    )
+
+    result = synthesizer.synthesize("重试")
+
+    assert result.audio == b"recovered"
+    assert attempts == [True, True]
+    assert delays == [0.35]
+
+
+def test_edge_speech_serializes_parallel_segments():
+    state = {"active": 0, "maximum": 0}
+    state_lock = threading.Lock()
+
+    class MeasuredCommunicate:
+        def __init__(self, text, *_args, **_kwargs):
+            self.text = text
+
+        async def stream(self):
+            with state_lock:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+            try:
+                await asyncio.sleep(0.02)
+                yield {"type": "audio", "data": self.text.encode("utf-8")}
+            finally:
+                with state_lock:
+                    state["active"] -= 1
+
+    synthesizer = EdgeSpeechSynthesizer()
+    synthesizer._sdk = SimpleNamespace(Communicate=MeasuredCommunicate)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(synthesizer.synthesize, ("第一段", "第二段")))
+
+    assert [result.audio.decode("utf-8") for result in results] == [
+        "第一段", "第二段"
+    ]
+    assert state["maximum"] == 1

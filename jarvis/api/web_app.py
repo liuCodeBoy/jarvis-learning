@@ -22,7 +22,10 @@ from typing import Any, Callable, Deque, Dict, Iterator, Optional, Tuple
 from urllib.parse import urlsplit
 
 import yaml
-from flask import Flask, Response, current_app, g, jsonify, render_template, request
+from flask import (
+    Flask, Response, current_app, g, jsonify, render_template, request,
+    stream_with_context,
+)
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -33,6 +36,7 @@ from jarvis.memory.bridge import MemoryBridge, get_memory_bridge
 from jarvis.tools.local_commands import LocalCommandExecutor
 from jarvis.voice import (
     AzureSpeechSynthesizer,
+    EdgeSpeechSynthesizer,
     SpeechSynthesisError,
     UnavailableSpeechSynthesizer,
 )
@@ -216,17 +220,13 @@ def _create_speech_synthesizer(project_config: Dict[str, Any]):
     provider = str(
         os.environ.get("JARVIS_VOICE_PROVIDER")
         or voice_config.get("provider")
-        or "azure"
+        or "auto"
     ).strip().lower()
-    if provider != "azure":
-        return UnavailableSpeechSynthesizer(
-            provider or "disabled", "精确语音合成已停用"
-        )
 
     azure_config = voice_config.get("azure", {})
     if not isinstance(azure_config, dict):
         azure_config = {}
-    return AzureSpeechSynthesizer(
+    azure = AzureSpeechSynthesizer(
         subscription_key=(
             os.environ.get("AZURE_SPEECH_KEY")
             or os.environ.get("SPEECH_KEY")
@@ -245,6 +245,40 @@ def _create_speech_synthesizer(project_config: Dict[str, Any]):
             os.environ.get("AZURE_SPEECH_ENDPOINT")
             or str(azure_config.get("endpoint") or "")
         ),
+    )
+    edge_config = voice_config.get("edge", {})
+    if not isinstance(edge_config, dict):
+        edge_config = {}
+    edge = EdgeSpeechSynthesizer(
+        voice=(
+            os.environ.get("EDGE_TTS_VOICE")
+            or str(edge_config.get("voice") or "zh-CN-YunxiNeural")
+        ),
+        rate=(
+            os.environ.get("EDGE_TTS_RATE")
+            or str(edge_config.get("rate") or "+0%")
+        ),
+        pitch=(
+            os.environ.get("EDGE_TTS_PITCH")
+            or str(edge_config.get("pitch") or "+0Hz")
+        ),
+    )
+
+    if provider == "azure":
+        return azure
+    if provider == "edge":
+        return edge
+    if provider == "auto":
+        if azure.available:
+            return azure
+        if edge.available:
+            return edge
+        reasons = "；".join(item for item in (azure.reason, edge.reason) if item)
+        return UnavailableSpeechSynthesizer(
+            "auto", reasons or "没有可用的语音合成服务"
+        )
+    return UnavailableSpeechSynthesizer(
+        provider or "disabled", "语音合成已停用"
     )
 
 
@@ -528,6 +562,228 @@ def _process_chat(path: Path, session_id: str, user_namespace: str,
         "session_id": session_id,
         "interaction_id": interaction_id,
     })
+
+
+def _ndjson_event(event_type: str, **payload: Any) -> str:
+    return json.dumps(
+        {"type": event_type, **payload},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) + "\n"
+
+
+def _process_chat_stream(path: Path, session_id: str, user_namespace: str,
+                         message: str, client: Any) -> Iterator[str]:
+    """Persist one model turn while forwarding its text deltas to the browser."""
+    interaction_id: Optional[int] = None
+    completed = False
+    with _db_connect(path) as connection:
+        rows = connection.execute("""
+            SELECT user_input, agent_response FROM (
+                SELECT id, user_input, agent_response FROM interactions
+                WHERE session_id = ? AND user_input != '' AND agent_response != ''
+                ORDER BY id DESC LIMIT 10
+            ) ORDER BY id ASC
+        """, (session_id,)).fetchall()
+        history = [
+            item
+            for row in rows
+            for item in (
+                {"role": "user", "content": row["user_input"]},
+                {"role": "assistant", "content": row["agent_response"]},
+            )
+        ]
+        cursor = connection.execute("""
+            INSERT INTO interactions
+                (session_id, timestamp, interaction_type, user_input, agent_response)
+            VALUES (?, ?, 'user_message', ?, '')
+        """, (session_id, time.time(), message))
+        interaction_id = cursor.lastrowid
+
+    yield _ndjson_event(
+        "start", session_id=session_id, interaction_id=interaction_id
+    )
+
+    try:
+        bridge: MemoryBridge = current_app.extensions["memory_bridge"]
+        local_result = current_app.extensions["local_command_executor"].execute(message)
+        if local_result is not None:
+            response_text = local_result.message
+            with _db_connect(path) as connection:
+                connection.execute(
+                    "UPDATE interactions SET agent_response = ? WHERE id = ?",
+                    (response_text, interaction_id),
+                )
+            completed = True
+            yield _ndjson_event("delta", text=response_text)
+            yield _ndjson_event(
+                "done",
+                response=response_text,
+                session_id=session_id,
+                interaction_id=interaction_id,
+                execution={
+                    "operation": local_result.operation,
+                    "executed": local_result.executed,
+                },
+            )
+            return
+
+        if not _llm_available(client):
+            yield _ndjson_event(
+                "error",
+                error={
+                    "code": "llm_unavailable",
+                    "message": (
+                        "尚未配置模型凭据，请设置 ANTHROPIC_API_KEY "
+                        "或 ANTHROPIC_AUTH_TOKEN"
+                    ),
+                },
+            )
+            return
+
+        memory_context = None
+        try:
+            relevant = bridge.retrieve_relevant(
+                message, max_items=5, namespace=user_namespace
+            )
+            memory_context = bridge.format_for_prompt(relevant) if relevant else None
+        except Exception:
+            logger.exception("Memory retrieval failed")
+
+        matcher: SkillMatcher = current_app.extensions["skill_matcher"]
+        try:
+            matched_skill = matcher.match(message)
+        except Exception:
+            logger.exception("Skill matching failed")
+            matched_skill = None
+
+        if matched_skill and callable(getattr(client, "chat_with_prompt_stream", None)):
+            model_events = client.chat_with_prompt_stream(
+                message,
+                matched_skill["prompt_template"],
+                history=history,
+                context=memory_context,
+            )
+        elif not matched_skill and callable(
+            getattr(client, "chat_with_memory_stream", None)
+        ):
+            model_events = client.chat_with_memory_stream(
+                message,
+                history,
+                memory_context,
+                db_path=str(path),
+            )
+        else:
+            response = (
+                client.chat_with_prompt(
+                    message,
+                    matched_skill["prompt_template"],
+                    history=history,
+                    context=memory_context,
+                )
+                if matched_skill
+                else client.chat_with_memory(
+                    message, history, memory_context, db_path=str(path)
+                )
+            )
+            model_events = iter(({"type": "delta", "text": response},))
+
+        response_parts = []
+        model_error = None
+        for event in model_events:
+            if isinstance(event, str):
+                event = {"type": "delta", "text": event}
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            if event_type == "reset":
+                response_parts.clear()
+                yield _ndjson_event("reset")
+                continue
+            if event_type == "error":
+                model_error = str(event.get("error") or "")
+                break
+            if event_type != "delta":
+                continue
+            text_delta = str(event.get("text") or "")
+            if text_delta:
+                response_parts.append(text_delta)
+                yield _ndjson_event("delta", text=text_delta)
+
+        if model_error:
+            if response_parts:
+                response_parts.clear()
+                yield _ndjson_event("reset")
+            error_code, error_message = _model_error(model_error)
+            yield _ndjson_event(
+                "error", error={"code": error_code, "message": error_message}
+            )
+            return
+
+        response_text = "".join(response_parts).strip()
+        if not response_text:
+            yield _ndjson_event(
+                "error",
+                error={
+                    "code": "empty_model_response",
+                    "message": "模型没有返回有效内容",
+                },
+            )
+            return
+        if getattr(client, "response_is_error", lambda value: False)(response_text):
+            yield _ndjson_event("reset")
+            error_code, error_message = _model_error(response_text)
+            yield _ndjson_event(
+                "error", error={"code": error_code, "message": error_message}
+            )
+            return
+
+        with _db_connect(path) as connection:
+            connection.execute(
+                "UPDATE interactions SET agent_response = ? WHERE id = ?",
+                (response_text, interaction_id),
+            )
+
+        if matched_skill:
+            try:
+                matcher.store.record_trigger(matched_skill["id"])
+            except Exception:
+                logger.exception("Skill trigger metric update failed")
+
+        if current_app.config["JARVIS_LEARNING_ENABLED"]:
+            threading.Thread(
+                target=_post_chat_tasks,
+                args=(
+                    current_app._get_current_object(), bridge, client, path,
+                    user_namespace, message, response_text, history, interaction_id,
+                ),
+                daemon=True,
+            ).start()
+
+        completed = True
+        yield _ndjson_event(
+            "done",
+            response=response_text,
+            session_id=session_id,
+            interaction_id=interaction_id,
+        )
+    except GeneratorExit:
+        raise
+    except Exception:
+        logger.exception("Streaming model request raised an exception")
+        yield _ndjson_event(
+            "error",
+            error={
+                "code": "model_request_failed",
+                "message": "模型服务请求失败，请稍后重试",
+            },
+        )
+    finally:
+        if interaction_id is not None and not completed:
+            with _db_connect(path) as connection:
+                connection.execute(
+                    "DELETE FROM interactions WHERE id = ?", (interaction_id,)
+                )
 
 
 def create_app(test_config: Optional[Dict[str, Any]] = None,
@@ -839,6 +1095,51 @@ def register_routes(app: Flask) -> None:
             return _process_chat(
                 path, session_id, user_namespace, message, client
             )
+
+    @app.post("/api/chat/stream")
+    @rate_limited("chat", 12, 60)
+    def chat_stream():
+        data = _json_body()
+        message = data.get("message")
+        if not isinstance(message, str) or not message.strip():
+            return _error("invalid_message", "请输入消息", 400)
+        message = message.strip()
+        if len(message) > MAX_MESSAGE_LENGTH:
+            return _error("message_too_long", "消息长度不能超过 8000 个字符", 400)
+
+        session_id = _validate_session_id(data.get("session_id"))
+        path: Path = current_app.config["JARVIS_DB_PATH"]
+        user_namespace = _session_user(path, session_id) if session_id else None
+        if not session_id or not user_namespace:
+            return _error("invalid_session", "会话已失效，请刷新后重试", 401)
+
+        gate: SessionRequestGate = current_app.extensions["session_request_gate"]
+        gate_context = gate.hold(session_id)
+        acquired = gate_context.__enter__()
+        if not acquired:
+            gate_context.__exit__(None, None, None)
+            return _error(
+                "session_busy",
+                "该会话正在处理另一条消息，请稍后重试",
+                409,
+            )
+
+        client = current_app.extensions["llm"]
+
+        def generate():
+            try:
+                yield from _process_chat_stream(
+                    path, session_id, user_namespace, message, client
+                )
+            finally:
+                gate_context.__exit__(None, None, None)
+
+        response = Response(
+            stream_with_context(generate()),
+            content_type="application/x-ndjson; charset=utf-8",
+        )
+        response.headers["X-Accel-Buffering"] = "no"
+        return response
 
     @app.get("/api/chat/history")
     def chat_history():

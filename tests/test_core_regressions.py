@@ -32,6 +32,24 @@ class JsonResponse:
         return self._payload
 
 
+class StreamResponse:
+    status_code = 200
+    text = ""
+    headers = {"Content-Type": "text/event-stream"}
+
+    def __init__(self, events):
+        self.events = events
+        self.closed = False
+
+    def iter_lines(self, decode_unicode=False):
+        for event in self.events:
+            line = "data: " + json.dumps(event, ensure_ascii=False)
+            yield line if decode_unicode else line.encode("utf-8")
+
+    def close(self):
+        self.closed = True
+
+
 def test_llm_uses_environment_only_and_preserves_system_messages(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
@@ -118,6 +136,157 @@ def test_anthropic_tool_use_executes_and_returns_result(monkeypatch):
             "path": "tes/index.html",
         }),
     }
+
+
+def test_anthropic_stream_yields_text_deltas_as_they_arrive(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "1")
+    response = StreamResponse([
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "你"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "好"},
+        },
+        {"type": "message_stop"},
+    ])
+    captured = {}
+
+    def fake_post(_url, **kwargs):
+        captured.update(kwargs)
+        return response
+
+    monkeypatch.setattr("jarvis.core.llm.requests.post", fake_post)
+
+    events = list(LLMConfig().chat_completion_stream([
+        {"role": "user", "content": "hello"},
+    ]))
+
+    assert events == [
+        {"type": "delta", "text": "你"},
+        {"type": "delta", "text": "好"},
+    ]
+    assert captured["json"]["stream"] is True
+    assert captured["stream"] is True
+    assert response.closed is True
+
+
+def test_anthropic_stream_does_not_duplicate_partial_text_on_retry(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "3")
+
+    class BrokenStream(StreamResponse):
+        def iter_lines(self, decode_unicode=False):
+            yield from super().iter_lines(decode_unicode=decode_unicode)
+            raise Timeout()
+
+    response = BrokenStream([
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "partial"},
+        },
+    ])
+    calls = []
+
+    def fake_post(*_args, **_kwargs):
+        calls.append(True)
+        return response
+
+    monkeypatch.setattr("jarvis.core.llm.requests.post", fake_post)
+
+    events = list(LLMConfig().chat_completion_stream([
+        {"role": "user", "content": "hello"},
+    ]))
+
+    assert events == [
+        {"type": "delta", "text": "partial"},
+        {"type": "reset"},
+        {"type": "error", "error": "[JARVIS_LLM_ERROR] network_Timeout"},
+    ]
+    assert calls == [True]
+
+
+def test_anthropic_stream_resets_prelude_before_tool_result(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "1")
+    responses = iter([
+        StreamResponse([
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": "正在处理"},
+            },
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tool-1",
+                    "name": "write_file",
+                    "input": {},
+                },
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": '{"path":"test.txt","content":"ok"}',
+                },
+            },
+            {"type": "message_stop"},
+        ]),
+        StreamResponse([
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": "已完成"},
+            },
+            {"type": "message_stop"},
+        ]),
+    ])
+    monkeypatch.setattr(
+        "jarvis.core.llm.requests.post", lambda *_args, **_kwargs: next(responses)
+    )
+    tool_calls = []
+
+    def execute(name, arguments):
+        tool_calls.append((name, arguments))
+        return json.dumps({
+            "ok": True,
+            "operation": name,
+            "path": arguments["path"],
+        })
+
+    events = list(LLMConfig().chat_completion_stream(
+        [{"role": "user", "content": "write it"}],
+        tools=[{"name": "write_file", "input_schema": {"type": "object"}}],
+        tool_executor=execute,
+    ))
+
+    assert events == [
+        {"type": "delta", "text": "正在处理"},
+        {"type": "reset"},
+        {"type": "delta", "text": "已完成"},
+    ]
+    assert tool_calls == [(
+        "write_file", {"path": "test.txt", "content": "ok"}
+    )]
 
 
 def test_tool_failure_cannot_be_reported_as_success(monkeypatch):

@@ -25,7 +25,11 @@ tools:
   workspace_path: "~/Desktop"
 
 voice:
-  # Exact lip sync requires audio and viseme offsets from the same TTS request.
-  provider: "azure"
+  # auto prefers Azure visemes, then falls back to audio-reactive Edge TTS.
+  provider: "auto"
   azure:
     voice: "zh-CN-YunxiNeural"
+  edge:
+    voice: "zh-CN-YunxiNeural"
+    rate: "+0%"
+    pitch: "+0Hz"

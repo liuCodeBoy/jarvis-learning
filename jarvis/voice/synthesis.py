@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +33,7 @@ class SpeechSynthesisResult:
     visemes: List[Dict[str, Any]]
     provider: str
     voice: str
+    viseme_source: str = "provider"
 
     def as_payload(self) -> Dict[str, Any]:
         return {
@@ -38,6 +42,7 @@ class SpeechSynthesisResult:
             "visemes": self.visemes,
             "provider": self.provider,
             "voice": self.voice,
+            "viseme_source": self.viseme_source,
         }
 
 
@@ -53,6 +58,109 @@ class UnavailableSpeechSynthesizer:
 
     def synthesize(self, _text: str) -> SpeechSynthesisResult:
         raise SpeechSynthesisError("speech_unavailable", self.reason)
+
+
+class EdgeSpeechSynthesizer:
+    """Keyless neural TTS whose played audio drives browser-side mouth analysis."""
+
+    provider = "edge"
+    mime_type = "audio/mpeg"
+
+    def __init__(
+        self,
+        voice: str = "zh-CN-YunxiNeural",
+        rate: str = "+0%",
+        pitch: str = "+0Hz",
+        max_attempts: int = 3,
+    ) -> None:
+        self.voice = str(voice or "zh-CN-YunxiNeural").strip()
+        self.rate = str(rate or "+0%").strip()
+        self.pitch = str(pitch or "+0Hz").strip()
+        self.max_attempts = max(1, min(3, int(max_attempts)))
+        self._sdk: Optional[Any] = None
+        self._synthesis_lock = threading.Lock()
+
+    def _load_sdk(self):
+        if self._sdk is not None:
+            return self._sdk
+        try:
+            self._sdk = importlib.import_module("edge_tts")
+        except ImportError as error:
+            raise SpeechSynthesisError(
+                "speech_sdk_missing",
+                "未安装 Edge TTS，请重新执行 pip install -r requirements.txt",
+            ) from error
+        return self._sdk
+
+    @property
+    def available(self) -> bool:
+        try:
+            self._load_sdk()
+        except SpeechSynthesisError:
+            return False
+        return True
+
+    @property
+    def reason(self) -> str:
+        try:
+            self._load_sdk()
+        except SpeechSynthesisError as error:
+            return error.message
+        return ""
+
+    def synthesize(self, text: str) -> SpeechSynthesisResult:
+        speechsdk = self._load_sdk()
+
+        async def collect_audio() -> bytes:
+            communicator = speechsdk.Communicate(
+                text,
+                self.voice,
+                rate=self.rate,
+                pitch=self.pitch,
+            )
+            chunks = []
+            async for event in communicator.stream():
+                if event.get("type") == "audio" and event.get("data"):
+                    chunks.append(bytes(event["data"]))
+            return b"".join(chunks)
+
+        audio = b""
+        last_error = None
+        with self._synthesis_lock:
+            for attempt in range(1, self.max_attempts + 1):
+                try:
+                    audio = asyncio.run(collect_audio())
+                    if audio:
+                        break
+                except Exception as error:
+                    last_error = error
+                if attempt < self.max_attempts:
+                    logger.warning(
+                        "Edge speech returned no audio on attempt %d/%d; retrying",
+                        attempt,
+                        self.max_attempts,
+                    )
+                    time.sleep(0.35 * attempt)
+        if not audio:
+            if last_error is not None:
+                logger.warning(
+                    "Edge speech request failed after retries: %s",
+                    type(last_error).__name__,
+                )
+                raise SpeechSynthesisError(
+                    "speech_provider_failed", "免密语音服务请求失败，请稍后重试"
+                ) from last_error
+            raise SpeechSynthesisError(
+                "empty_speech_audio", "语音服务返回了空音频"
+            )
+        return SpeechSynthesisResult(
+            audio=audio,
+            mime_type=self.mime_type,
+            visemes=[],
+            provider=self.provider,
+            voice=self.voice,
+            viseme_source="audio-analysis",
+        )
 
 
 class AzureSpeechSynthesizer:

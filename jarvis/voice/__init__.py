@@ -2,6 +2,7 @@
 
 from .synthesis import (
     AzureSpeechSynthesizer,
+    EdgeSpeechSynthesizer,
     SpeechSynthesisError,
     SpeechSynthesisResult,
     UnavailableSpeechSynthesizer,
@@ -9,6 +10,7 @@ from .synthesis import (
 
 __all__ = [
     "AzureSpeechSynthesizer",
+    "EdgeSpeechSynthesizer",
     "SpeechSynthesisError",
     "SpeechSynthesisResult",
     "UnavailableSpeechSynthesizer",

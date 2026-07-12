@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 import requests
 import yaml
@@ -150,6 +150,70 @@ class LLMConfig:
             return "模型服务网络请求失败"
         return "模型服务未返回有效结果"
 
+    def _completion_request(self, messages: list, temperature: Optional[float],
+                            tools: Optional[list]):
+        """Build one Anthropic-compatible request without exposing credentials."""
+        system_messages = []
+        claude_messages = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+            if role == "system":
+                if content:
+                    system_messages.append(str(content))
+                continue
+            if role not in ("user", "assistant") or not content:
+                continue
+            claude_messages.append({
+                "role": role,
+                "content": content if isinstance(content, list) else str(content),
+            })
+
+        if not claude_messages:
+            return None
+
+        effective_temperature = (
+            self.temperature if temperature is None else float(temperature)
+        )
+        payload = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": claude_messages,
+            "temperature": max(0.0, min(1.0, effective_temperature)),
+        }
+        if system_messages:
+            payload["system"] = "\n\n".join(system_messages)
+        if tools:
+            payload["tools"] = tools
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}" if self.auth_token else "",
+            "x-api-key": "" if self.auth_token else self.api_key,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+        return (
+            payload,
+            {key: value for key, value in headers.items() if value},
+            f"{self.base_url}/v1/messages",
+        )
+
+    def _stream_error_event(self, marker: str, trace: Optional[list]) -> dict:
+        completed = [item for item in (trace or []) if item.get("ok")]
+        if not completed:
+            return {"type": "error", "error": marker}
+        details = "；".join(
+            f"{item.get('operation')}：{item.get('path', '已执行')}"
+            for item in completed
+        )
+        return {
+            "type": "delta",
+            "text": (
+                f"本地工具已执行到以下步骤：{details}。后续模型请求失败"
+                f"（{self._model_error_reason(marker)}），任务未确认全部完成。"
+            ),
+        }
+
     def chat_completion(self, messages: list, temperature: Optional[float] = None,
                         tools: Optional[list] = None, tool_executor=None,
                         _tool_depth: int = 0,
@@ -169,59 +233,16 @@ class LLMConfig:
             return f"{LLM_ERROR_PREFIX} unconfigured"
 
         try:
-            # Anthropic accepts one system field. Preserve every system message
-            # in order instead of silently replacing earlier instructions.
-            system_messages = []
-            claude_messages = []
-
-            for msg in messages:
-                role = msg.get('role')
-                content = msg.get('content')
-                if role == 'system':
-                    if content:
-                        system_messages.append(str(content))
-                    continue
-                if role not in ('user', 'assistant') or not content:
-                    continue
-                claude_messages.append({
-                    "role": role,
-                    "content": content if isinstance(content, list) else str(content),
-                })
-
-            if not claude_messages:
+            prepared = self._completion_request(messages, temperature, tools)
+            if prepared is None:
                 return f"{LLM_ERROR_PREFIX} no_messages"
-
-            effective_temperature = (
-                self.temperature if temperature is None else float(temperature)
-            )
-            effective_temperature = max(0.0, min(1.0, effective_temperature))
-            payload = {
-                "model": self.model,
-                "max_tokens": self.max_tokens,
-                "messages": claude_messages,
-                "temperature": effective_temperature
-            }
-
-            if system_messages:
-                payload["system"] = "\n\n".join(system_messages)
-            if tools:
-                payload["tools"] = tools
-
-            headers = {
-                "Authorization": f"Bearer {self.api_key}"
-                if self.auth_token else "",
-                "x-api-key": "" if self.auth_token else self.api_key,
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            }
-            headers = {key: value for key, value in headers.items() if value}
+            payload, headers, url = prepared
 
             logger.debug(
-                "Calling model=%s messages=%d", self.model, len(claude_messages)
+                "Calling model=%s messages=%d",
+                self.model,
+                len(payload["messages"]),
             )
-
-            # base_url 已含 /anthropic 时直接拼 /v1/messages；否则也直接拼。
-            url = f"{self.base_url}/v1/messages"
 
             # 重试配置：网关 503/限流 429/网络抖动时退避重试，4xx 鉴权/参数错误立即返回
             last_error_text = ""
@@ -379,6 +400,302 @@ class LLMConfig:
             logger.exception("Unexpected model request error")
             return f"{LLM_ERROR_PREFIX} unexpected_{type(e).__name__}"
 
+    def chat_completion_stream(
+        self,
+        messages: list,
+        temperature: Optional[float] = None,
+        tools: Optional[list] = None,
+        tool_executor=None,
+        _tool_depth: int = 0,
+        _tool_trace: Optional[list] = None,
+        _deadline: Optional[float] = None,
+    ) -> Iterator[dict]:
+        """Yield model text deltas while preserving structured tool round trips."""
+        if not self.api_key:
+            yield {
+                "type": "error",
+                "error": f"{LLM_ERROR_PREFIX} unconfigured",
+            }
+            return
+
+        try:
+            prepared = self._completion_request(messages, temperature, tools)
+        except Exception as error:
+            logger.exception("Unable to construct streaming model request")
+            yield self._stream_error_event(
+                f"{LLM_ERROR_PREFIX} unexpected_{type(error).__name__}",
+                _tool_trace,
+            )
+            return
+        if prepared is None:
+            yield self._stream_error_event(
+                f"{LLM_ERROR_PREFIX} no_messages", _tool_trace
+            )
+            return
+
+        payload, headers, url = prepared
+        payload = dict(payload)
+        payload["stream"] = True
+        deadline = _deadline or (time.monotonic() + self.total_timeout)
+        last_error_text = ""
+        last_status = 0
+
+        for attempt in range(1, self.max_retries + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            response = None
+            emitted_text = False
+            try:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=min(self.request_timeout, max(0.1, remaining)),
+                )
+                logger.debug(
+                    "Streaming model attempt %d/%d returned HTTP %d",
+                    attempt,
+                    self.max_retries,
+                    response.status_code,
+                )
+
+                if response.status_code == 200:
+                    blocks: Dict[int, dict] = {}
+                    content_type = str(
+                        getattr(response, "headers", {}).get("Content-Type", "")
+                    ).lower()
+
+                    if "application/json" in content_type and "event-stream" not in content_type:
+                        result = response.json()
+                        for index, source in enumerate(result.get("content", [])):
+                            block = dict(source)
+                            blocks[index] = block
+                            if block.get("type") == "text" and block.get("text"):
+                                emitted_text = True
+                                yield {"type": "delta", "text": str(block["text"])}
+                    else:
+                        for raw_line in response.iter_lines(decode_unicode=False):
+                            if time.monotonic() >= deadline:
+                                raise requests.exceptions.Timeout()
+                            if not raw_line:
+                                continue
+                            line = (
+                                raw_line.decode("utf-8", errors="replace")
+                                if isinstance(raw_line, bytes)
+                                else str(raw_line)
+                            ).strip()
+                            if line.startswith("data:"):
+                                encoded_event = line[5:].strip()
+                            elif line.startswith("{"):
+                                encoded_event = line
+                            else:
+                                continue
+                            if encoded_event == "[DONE]":
+                                break
+                            event = json.loads(encoded_event)
+
+                            # Some compatible gateways ignore stream=true and send
+                            # one ordinary Messages response as a JSON line.
+                            if isinstance(event.get("content"), list):
+                                for index, source in enumerate(event["content"]):
+                                    block = dict(source)
+                                    blocks[index] = block
+                                    if block.get("type") == "text" and block.get("text"):
+                                        emitted_text = True
+                                        yield {
+                                            "type": "delta",
+                                            "text": str(block["text"]),
+                                        }
+                                break
+
+                            event_type = event.get("type")
+                            if event_type == "error":
+                                detail = event.get("error") or {}
+                                raise RuntimeError(
+                                    str(detail.get("type") or "stream_error")
+                                )
+                            if event_type == "content_block_start":
+                                index = int(event.get("index", len(blocks)))
+                                block = dict(event.get("content_block") or {})
+                                if block.get("type") == "tool_use":
+                                    block["_partial_json"] = ""
+                                blocks[index] = block
+                                initial_text = block.get("text")
+                                if block.get("type") == "text" and initial_text:
+                                    emitted_text = True
+                                    yield {
+                                        "type": "delta",
+                                        "text": str(initial_text),
+                                    }
+                                continue
+                            if event_type != "content_block_delta":
+                                continue
+
+                            index = int(event.get("index", 0))
+                            delta = event.get("delta") or {}
+                            delta_type = delta.get("type")
+                            if delta_type == "text_delta":
+                                text = str(delta.get("text") or "")
+                                block = blocks.setdefault(
+                                    index, {"type": "text", "text": ""}
+                                )
+                                block["text"] = str(block.get("text") or "") + text
+                                if text:
+                                    emitted_text = True
+                                    yield {"type": "delta", "text": text}
+                            elif delta_type == "input_json_delta":
+                                block = blocks.setdefault(
+                                    index,
+                                    {"type": "tool_use", "_partial_json": ""},
+                                )
+                                block["_partial_json"] = (
+                                    str(block.get("_partial_json") or "")
+                                    + str(delta.get("partial_json") or "")
+                                )
+
+                    content = []
+                    for index in sorted(blocks):
+                        block = dict(blocks[index])
+                        partial_json = block.pop("_partial_json", "")
+                        if block.get("type") == "tool_use" and partial_json:
+                            try:
+                                block["input"] = json.loads(partial_json)
+                            except json.JSONDecodeError:
+                                block["input"] = {}
+                        content.append(block)
+
+                    tool_blocks = [
+                        block for block in content if block.get("type") == "tool_use"
+                    ]
+                    if tool_blocks:
+                        if emitted_text:
+                            yield {"type": "reset"}
+                        if not tools or not tool_executor or _tool_depth >= 8:
+                            yield self._stream_error_event(
+                                f"{LLM_ERROR_PREFIX} tool_loop_limit",
+                                _tool_trace,
+                            )
+                            return
+
+                        trace = list(_tool_trace or [])
+                        tool_results = []
+                        for block in tool_blocks:
+                            output = tool_executor(
+                                block.get("name", ""), block.get("input") or {}
+                            )
+                            try:
+                                trace.append(json.loads(output))
+                            except (TypeError, json.JSONDecodeError):
+                                trace.append({
+                                    "ok": False,
+                                    "operation": block.get("name", "unknown"),
+                                    "error": "tool returned an invalid result",
+                                })
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.get("id", ""),
+                                "content": output,
+                            })
+
+                        failures = [item for item in trace if not item.get("ok")]
+                        if failures:
+                            details = "；".join(
+                                f"{item.get('operation')}："
+                                f"{item.get('error', '执行失败')}"
+                                for item in failures
+                            )
+                            yield {
+                                "type": "delta",
+                                "text": f"本地操作未完全成功：{details}。",
+                            }
+                            return
+
+                        yield from self.chat_completion_stream(
+                            messages + [
+                                {"role": "assistant", "content": content},
+                                {"role": "user", "content": tool_results},
+                            ],
+                            temperature=temperature,
+                            tools=tools,
+                            tool_executor=tool_executor,
+                            _tool_depth=_tool_depth + 1,
+                            _tool_trace=trace,
+                            _deadline=deadline,
+                        )
+                        return
+
+                    if emitted_text:
+                        return
+                    yield self._stream_error_event(
+                        f"{LLM_ERROR_PREFIX} empty_response", _tool_trace
+                    )
+                    return
+
+                if (
+                    response.status_code in (429, 500, 502, 503, 504)
+                    and attempt < self.max_retries
+                ):
+                    last_status = response.status_code
+                    wait = self.retry_backoff * (2 ** (attempt - 1))
+                    wait = min(wait, max(0.0, deadline - time.monotonic()))
+                    if wait <= 0:
+                        break
+                    time.sleep(wait)
+                    continue
+
+                detail = response.text.strip().replace(self.api_key, "<redacted>")
+                logger.error(
+                    "Streaming model request failed with HTTP %d: %s",
+                    response.status_code,
+                    detail[:300],
+                )
+                yield self._stream_error_event(
+                    f"{LLM_ERROR_PREFIX} http_{response.status_code}",
+                    _tool_trace,
+                )
+                return
+            except requests.exceptions.RequestException as error:
+                last_status = -1
+                last_error_text = type(error).__name__
+                if emitted_text:
+                    yield {"type": "reset"}
+                if not emitted_text and attempt < self.max_retries:
+                    wait = self.retry_backoff * (2 ** (attempt - 1))
+                    wait = min(wait, max(0.0, deadline - time.monotonic()))
+                    if wait > 0:
+                        time.sleep(wait)
+                        continue
+                marker = (
+                    f"{LLM_ERROR_PREFIX} total_timeout"
+                    if time.monotonic() >= deadline
+                    else f"{LLM_ERROR_PREFIX} network_{type(error).__name__}"
+                )
+                yield self._stream_error_event(marker, _tool_trace)
+                return
+            except Exception as error:
+                logger.exception("Unexpected streaming model response error")
+                if emitted_text:
+                    yield {"type": "reset"}
+                yield self._stream_error_event(
+                    f"{LLM_ERROR_PREFIX} unexpected_{type(error).__name__}",
+                    _tool_trace,
+                )
+                return
+            finally:
+                if response is not None and hasattr(response, "close"):
+                    response.close()
+
+        marker = (
+            f"{LLM_ERROR_PREFIX} retry_http_{last_status}"
+            if last_status > 0
+            else f"{LLM_ERROR_PREFIX} retries_exhausted_{last_error_text[:40]}"
+        )
+        if time.monotonic() >= deadline:
+            marker = f"{LLM_ERROR_PREFIX} total_timeout"
+        yield self._stream_error_event(marker, _tool_trace)
+
     def chat_with_context(self, user_message: str, context: Optional[str] = None) -> str:
         """带上下文的对话"""
         messages = []
@@ -442,6 +759,21 @@ class LLMConfig:
             context=memory_context,
         )
 
+    def chat_with_memory_stream(
+        self,
+        user_message: str,
+        history: Optional[list] = None,
+        memory_context: Optional[str] = None,
+        db_path: str = DEFAULT_DB_PATH,
+    ) -> Iterator[dict]:
+        """Stream a memory-aware conversation as typed model events."""
+        yield from self.chat_with_prompt_stream(
+            user_message,
+            self.get_current_best_prompt(db_path),
+            history=history,
+            context=memory_context,
+        )
+
     def chat_with_prompt(self, user_message: str, system_prompt: str,
                          history: Optional[list] = None,
                          context: Optional[str] = None) -> str:
@@ -481,6 +813,56 @@ class LLMConfig:
             "content": self._user_message_with_context(user_message, context),
         })
         return self.chat_completion(
+            messages,
+            tools=TOOL_DEFINITIONS,
+            tool_executor=execute,
+        )
+
+    def chat_with_prompt_stream(
+        self,
+        user_message: str,
+        system_prompt: str,
+        history: Optional[list] = None,
+        context: Optional[str] = None,
+    ) -> Iterator[dict]:
+        """Stream a trusted-prompt conversation with the same host-tool policy."""
+        try:
+            from jarvis.tools.host_tools import (
+                TOOL_DEFINITIONS,
+                execute,
+                workspace_root,
+            )
+        except ImportError:
+            logger.exception("Host tool setup failed")
+            yield {
+                "type": "error",
+                "error": f"{LLM_ERROR_PREFIX} tool_setup_failed",
+            }
+            return
+
+        tool_prompt = (
+            "你可以使用本地工具完成文件系统操作。工作区根目录是："
+            f"{workspace_root()}。用户要求创建、读取、写入、修改或打开本地文件时，"
+            "必须调用工具并根据工具返回的 ok 字段报告结果；没有成功的工具结果时，"
+            "不得声称操作已经完成。修改已有文件时先调用 read_file 获取当前内容，"
+            "再调用 write_file 写入完整的新内容。write_file 会自动创建父目录，"
+            "写文件任务不需要提前调用 create_directory。所有路径都应位于工作区根目录内。"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": tool_prompt},
+        ]
+        if history:
+            for item in history:
+                role = item.get("role")
+                content = (item.get("content") or "").strip()
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
+        messages.append({
+            "role": "user",
+            "content": self._user_message_with_context(user_message, context),
+        })
+        yield from self.chat_completion_stream(
             messages,
             tools=TOOL_DEFINITIONS,
             tool_executor=execute,

@@ -11,6 +11,7 @@
     var voiceUnavailableReason = "精确语音合成尚未配置";
     var speechAudioContext = null;
     var activeSpeech = null;
+    var activeSpeechQueue = null;
     var recognition = null;
     var microphoneStream = null;
     var audioContext = null;
@@ -237,57 +238,47 @@
         updateVoiceButton();
     }
 
-    async function typeResponse(messageElement, text, operationId) {
+    function appendResponseText(messageElement, text) {
         var body = messageElement.querySelector(".message-body");
-        var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        if (reduced || text.length > 5000) {
-            body.textContent = text;
-            return;
+        if (messageElement.classList.contains("pending")) {
+            messageElement.classList.remove("pending");
+            body.textContent = "";
         }
-        body.textContent = "";
-        var cursor = 0;
-        while (cursor < text.length && operationId === machine.operationId) {
-            var naturalSize = /[\u3000-\u9fff]/.test(text[cursor]) ? 2 : 4;
-            var size = Math.max(naturalSize, Math.ceil(text.length / 180));
-            cursor = Math.min(text.length, cursor + size);
-            body.textContent = text.slice(0, cursor);
-            elements.messages.scrollTop = elements.messages.scrollHeight;
-            await new Promise(function (resolve) {
-                window.setTimeout(resolve, 14);
-            });
-        }
-        if (cursor < text.length) {
-            body.textContent = text;
-        }
+        body.textContent += String(text || "");
+        elements.messages.scrollTop = elements.messages.scrollHeight;
     }
 
-    function splitSpeechText(text, maxLength) {
-        var remaining = String(text || "").trim();
-        var chunks = [];
-        var limit = Math.max(80, Number(maxLength) || 240);
-        var punctuation = ["。", "！", "？", ".", "!", "?", "；", ";", "\n", "，", ","];
-        while (remaining.length > limit) {
-            var candidate = remaining.slice(0, limit + 1);
-            var boundary = -1;
-            punctuation.forEach(function (marker) {
-                boundary = Math.max(boundary, candidate.lastIndexOf(marker));
-            });
-            if (boundary < limit * 0.35) {
-                boundary = Math.max(
-                    candidate.lastIndexOf(" "), candidate.lastIndexOf("\t")
-                );
+    function resetResponseText(messageElement) {
+        messageElement.classList.add("pending");
+        messageElement.querySelector(".message-body").textContent = "正在处理";
+    }
+
+    function speechChunkBoundary(text, finalChunk) {
+        var hardLimit = 220;
+        var scanLimit = Math.min(text.length, hardLimit);
+        var strong = "。！？!?\n";
+        var soft = "；;，,：:";
+        for (var index = 0; index < scanLimit; index += 1) {
+            if (strong.indexOf(text[index]) !== -1 && index >= 1) {
+                return index + 1;
             }
-            boundary = boundary < limit * 0.35 ? limit : boundary + 1;
-            var chunk = remaining.slice(0, boundary).trim();
-            if (chunk) {
-                chunks.push(chunk);
+            if (soft.indexOf(text[index]) !== -1 && index >= 31) {
+                return index + 1;
             }
-            remaining = remaining.slice(boundary).trim();
         }
-        if (remaining) {
-            chunks.push(remaining);
+        if (text.length >= hardLimit) {
+            var candidate = text.slice(0, hardLimit + 1);
+            var boundary = Math.max(
+                candidate.lastIndexOf(" "),
+                candidate.lastIndexOf("\t"),
+                candidate.lastIndexOf("，"),
+                candidate.lastIndexOf(","),
+                candidate.lastIndexOf("；"),
+                candidate.lastIndexOf(";")
+            );
+            return boundary >= 80 ? boundary + 1 : hardLimit;
         }
-        return chunks;
+        return finalChunk ? text.length : 0;
     }
 
     function ensureSpeechAudioContext() {
@@ -305,6 +296,11 @@
     }
 
     function cancelSpeechPlayback() {
+        if (activeSpeechQueue && activeSpeechQueue.cancel) {
+            var queue = activeSpeechQueue;
+            activeSpeechQueue = null;
+            queue.cancel(true);
+        }
         if (activeSpeech && activeSpeech.finish) {
             activeSpeech.finish(false);
         }
@@ -323,7 +319,8 @@
         return bytes.buffer;
     }
 
-    async function playSpeechSegment(payload, operationId) {
+    async function playSpeechSegment(payload, operationId, options) {
+        options = options || {};
         var context = ensureSpeechAudioContext();
         if (!context) {
             throw new Error("当前浏览器不支持音频播放");
@@ -338,10 +335,19 @@
         return new Promise(function (resolve) {
             var source = context.createBufferSource();
             var timeline = Array.isArray(payload.visemes) ? payload.visemes : [];
+            var useAudioAnalysis = (
+                payload.viseme_source === "audio-analysis" || !timeline.length
+            );
+            var analyser = null;
+            var timeSamples = null;
+            var frequencySamples = null;
+            var audioEnvelope = 0;
+            var lastAudioAnalysisAt = -100;
             var timelineIndex = -1;
             var animationFrame = null;
             var settled = false;
             var startedAt = context.currentTime;
+            var durationMs = Math.max(1, buffer.duration * 1000);
 
             function finish(completed) {
                 if (settled) {
@@ -363,6 +369,9 @@
                 if (face) {
                     face.stopSpeaking();
                 }
+                if (completed && typeof options.onProgress === "function") {
+                    options.onProgress(durationMs, durationMs);
+                }
                 resolve(completed);
             }
 
@@ -375,20 +384,84 @@
                     return;
                 }
                 var elapsedMs = Math.max(0, context.currentTime - startedAt) * 1000;
-                while (
-                    timelineIndex + 1 < timeline.length
-                    && Number(timeline[timelineIndex + 1].offset_ms) <= elapsedMs
-                ) {
-                    timelineIndex += 1;
+                if (typeof options.onProgress === "function") {
+                    options.onProgress(Math.min(elapsedMs, durationMs), durationMs);
+                }
+                if (useAudioAnalysis && analyser && elapsedMs - lastAudioAnalysisAt >= 40) {
+                    lastAudioAnalysisAt = elapsedMs;
+                    analyser.getByteTimeDomainData(timeSamples);
+                    var sumSquares = 0;
+                    for (var sample = 0; sample < timeSamples.length; sample += 1) {
+                        var amplitude = (timeSamples[sample] - 128) / 128;
+                        sumSquares += amplitude * amplitude;
+                    }
+                    var rms = Math.sqrt(sumSquares / timeSamples.length);
+                    var targetEnvelope = Math.max(
+                        0, Math.min(1, (rms - 0.008) * 11)
+                    );
+                    audioEnvelope = audioEnvelope * 0.58 + targetEnvelope * 0.42;
+                    var reactiveViseme = 0;
+                    if (audioEnvelope >= 0.035) {
+                        analyser.getByteFrequencyData(frequencySamples);
+                        var magnitudeTotal = 0;
+                        var weightedFrequency = 0;
+                        for (
+                            var bin = 1;
+                            bin < frequencySamples.length;
+                            bin += 1
+                        ) {
+                            magnitudeTotal += frequencySamples[bin];
+                            weightedFrequency += frequencySamples[bin] * bin;
+                        }
+                        var centroid = magnitudeTotal
+                            ? weightedFrequency
+                                / (magnitudeTotal * (frequencySamples.length - 1))
+                            : 0;
+                        if (audioEnvelope < 0.13) {
+                            reactiveViseme = 21;
+                        } else if (centroid > 0.52) {
+                            reactiveViseme = audioEnvelope > 0.48 ? 16 : 15;
+                        } else if (centroid < 0.2) {
+                            reactiveViseme = audioEnvelope > 0.55 ? 3 : 7;
+                        } else if (audioEnvelope > 0.72) {
+                            reactiveViseme = 2;
+                        } else if (audioEnvelope > 0.48) {
+                            reactiveViseme = 1;
+                        } else if (centroid > 0.34) {
+                            reactiveViseme = 6;
+                        } else {
+                            reactiveViseme = 4;
+                        }
+                    }
                     if (face) {
-                        face.setViseme(Number(timeline[timelineIndex].id));
+                        face.setViseme(reactiveViseme);
+                    }
+                } else if (!useAudioAnalysis) {
+                    while (
+                        timelineIndex + 1 < timeline.length
+                        && Number(timeline[timelineIndex + 1].offset_ms) <= elapsedMs
+                    ) {
+                        timelineIndex += 1;
+                        if (face) {
+                            face.setViseme(Number(timeline[timelineIndex].id));
+                        }
                     }
                 }
                 animationFrame = window.requestAnimationFrame(animateVisemes);
             }
 
             source.buffer = buffer;
-            source.connect(context.destination);
+            if (useAudioAnalysis) {
+                analyser = context.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.smoothingTimeConstant = 0.58;
+                timeSamples = new Uint8Array(analyser.fftSize);
+                frequencySamples = new Uint8Array(analyser.frequencyBinCount);
+                source.connect(analyser);
+                analyser.connect(context.destination);
+            } else {
+                source.connect(context.destination);
+            }
             source.onended = function () { finish(true); };
             activeSpeech = { source: source, finish: finish };
             machine.set("speaking", { operationId: operationId });
@@ -397,59 +470,281 @@
             }
             source.start(0);
             startedAt = context.currentTime;
+            if (typeof options.onStart === "function") {
+                options.onStart();
+            }
             animateVisemes();
         });
     }
 
-    async function speakResponse(text, operationId) {
-        if (!voiceEnabled) {
-            return false;
+    function createSpeechStream(messageElement, operationId) {
+        var body = messageElement.querySelector(".message-body");
+        var receivedText = "";
+        var visibleText = "";
+        var pendingText = "";
+        var items = [];
+        var playIndex = 0;
+        var pumping = false;
+        var ended = false;
+        var cancelled = false;
+        var failed = false;
+        var displayStarted = false;
+        var settled = false;
+        var requestController = new AbortController();
+        var resolveCompletion;
+        var completion = new Promise(function (resolve) {
+            resolveCompletion = resolve;
+        });
+        var streamApi = null;
+
+        function settle(value) {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            if (activeSpeechQueue === streamApi) {
+                activeSpeechQueue = null;
+            }
+            resolveCompletion(value);
         }
-        if (!voiceAvailable) {
-            showToast(voiceUnavailableReason, "error");
-            return false;
+
+        function beginDisplay() {
+            if (displayStarted) {
+                return;
+            }
+            displayStarted = true;
+            messageElement.classList.remove("pending");
+            body.textContent = "";
         }
-        cancelSpeechPlayback();
-        var chunks = splitSpeechText(text, 240);
-        if (!chunks.length) {
-            return false;
+
+        function render(text) {
+            if (!text) {
+                return;
+            }
+            beginDisplay();
+            visibleText += text;
+            body.textContent = visibleText;
+            elements.messages.scrollTop = elements.messages.scrollHeight;
         }
-        function requestChunk(index) {
-            return api.request("/api/speech", {
+
+        function revealReceivedText() {
+            beginDisplay();
+            visibleText = receivedText;
+            body.textContent = receivedText;
+            elements.messages.scrollTop = elements.messages.scrollHeight;
+        }
+
+        function enqueue(text) {
+            if (!text) {
+                return;
+            }
+            items.push({
+                text: text,
+                speechText: text.trim(),
+                request: null
+            });
+        }
+
+        function flushChunks(finalChunk) {
+            var boundary = speechChunkBoundary(pendingText, finalChunk);
+            while (boundary > 0) {
+                enqueue(pendingText.slice(0, boundary));
+                pendingText = pendingText.slice(boundary);
+                boundary = speechChunkBoundary(pendingText, finalChunk);
+            }
+        }
+
+        function requestItem(item) {
+            if (item.request) {
+                return;
+            }
+            if (!item.speechText) {
+                item.request = Promise.resolve({ payload: null, error: null });
+                return;
+            }
+            item.request = api.request("/api/speech", {
                 method: "POST",
-                body: { text: chunks[index], session_id: sessionId },
-                timeout: 90000
+                body: { text: item.speechText, session_id: sessionId },
+                timeout: 90000,
+                signal: requestController.signal
             }).then(function (payload) {
                 return { payload: payload, error: null };
             }, function (error) {
                 return { payload: null, error: error };
             });
         }
-        try {
-            var pendingChunk = requestChunk(0);
-            for (var index = 0; index < chunks.length; index += 1) {
-                if (operationId !== machine.operationId || !voiceEnabled) {
-                    return false;
+
+        function prefetch() {
+            var end = Math.min(items.length, playIndex + 2);
+            for (var index = playIndex; index < end; index += 1) {
+                requestItem(items[index]);
+            }
+        }
+
+        function failSpeech(error) {
+            if (failed || cancelled) {
+                return;
+            }
+            failed = true;
+            requestController.abort();
+            if (activeSpeech && activeSpeech.finish) {
+                activeSpeech.finish(false);
+            }
+            revealReceivedText();
+            showToast(error.message || "语音播放失败", "error");
+            settle(false);
+        }
+
+        async function pump() {
+            if (pumping || cancelled || failed) {
+                return;
+            }
+            pumping = true;
+            try {
+                while (!cancelled && !failed && playIndex < items.length) {
+                    prefetch();
+                    var item = items[playIndex];
+                    var outcome = await item.request;
+                    if (cancelled || failed) {
+                        break;
+                    }
+                    if (outcome.error) {
+                        throw outcome.error;
+                    }
+                    if (!outcome.payload) {
+                        render(item.text);
+                        playIndex += 1;
+                        continue;
+                    }
+
+                    var revealed = 0;
+                    var played = await playSpeechSegment(
+                        outcome.payload,
+                        operationId,
+                        {
+                            onStart: beginDisplay,
+                            onProgress: function (elapsedMs, durationMs) {
+                                var progress = Math.min(1, elapsedMs / durationMs);
+                                var target = Math.min(
+                                    item.text.length,
+                                    Math.floor(item.text.length * progress)
+                                );
+                                if (target > revealed) {
+                                    render(item.text.slice(revealed, target));
+                                    revealed = target;
+                                }
+                            }
+                        }
+                    );
+                    if (!played) {
+                        cancelled = true;
+                        settle(false);
+                        break;
+                    }
+                    if (revealed < item.text.length) {
+                        render(item.text.slice(revealed));
+                    }
+                    playIndex += 1;
                 }
-                var outcome = await pendingChunk;
-                if (outcome.error) {
-                    throw outcome.error;
-                }
-                pendingChunk = index + 1 < chunks.length
-                    ? requestChunk(index + 1)
-                    : null;
-                var completed = await playSpeechSegment(
-                    outcome.payload, operationId
-                );
-                if (!completed) {
-                    return false;
+            } catch (error) {
+                failSpeech(error);
+            } finally {
+                pumping = false;
+                if (!cancelled && !failed && playIndex < items.length) {
+                    window.setTimeout(pump, 0);
+                } else if (ended && playIndex >= items.length) {
+                    settle(true);
                 }
             }
-            return true;
+        }
+
+        streamApi = {
+            push: function (text) {
+                if (cancelled) {
+                    return false;
+                }
+                text = String(text || "");
+                receivedText += text;
+                if (failed) {
+                    revealReceivedText();
+                    return true;
+                }
+                pendingText += text;
+                flushChunks(false);
+                prefetch();
+                pump();
+                return true;
+            },
+            finish: function () {
+                ended = true;
+                if (cancelled) {
+                    settle(false);
+                    return completion;
+                }
+                if (failed) {
+                    revealReceivedText();
+                    settle(false);
+                    return completion;
+                }
+                flushChunks(true);
+                prefetch();
+                pump();
+                if (!pumping && playIndex >= items.length) {
+                    settle(true);
+                }
+                return completion;
+            },
+            cancel: function (revealText) {
+                if (cancelled) {
+                    return;
+                }
+                cancelled = true;
+                requestController.abort();
+                if (activeSpeech && activeSpeech.finish) {
+                    activeSpeech.finish(false);
+                }
+                if (revealText) {
+                    revealReceivedText();
+                }
+                settle(false);
+            }
+        };
+        activeSpeechQueue = streamApi;
+        return streamApi;
+    }
+
+    async function requestChatResponse(message, onEvent) {
+        try {
+            return await api.stream("/api/chat/stream", {
+                method: "POST",
+                body: { message: message, session_id: sessionId },
+                timeout: 610000
+            }, onEvent);
         } catch (error) {
-            cancelSpeechPlayback();
-            showToast(error.message || "语音播放失败", "error");
-            return false;
+            if (error.status !== 404 || error.code !== "not_found") {
+                throw error;
+            }
+            var legacy = await api.request("/api/chat", {
+                method: "POST",
+                body: { message: message, session_id: sessionId },
+                timeout: 610000
+            });
+            var start = {
+                type: "start",
+                interaction_id: legacy.interaction_id,
+                session_id: legacy.session_id
+            };
+            var delta = { type: "delta", text: legacy.response };
+            var done = {
+                type: "done",
+                response: legacy.response,
+                interaction_id: legacy.interaction_id,
+                session_id: legacy.session_id
+            };
+            await onEvent(start);
+            await onEvent(delta);
+            await onEvent(done);
+            return done;
         }
     }
 
@@ -463,7 +758,10 @@
             ensureSpeechAudioContext();
         }
         setBusy(true);
-        var pending = null;
+        var responseNode = null;
+        var speechStream = null;
+        var fullResponse = "";
+        var interactionId = null;
 
         try {
             if (!sessionId) {
@@ -473,33 +771,73 @@
             addMessage("user", message, false);
             elements["user-input"].value = "";
             resizeComposer();
-            pending = addMessage("assistant", "正在处理", true);
-            var data = await api.request("/api/chat", {
-                method: "POST",
-                body: { message: message, session_id: sessionId },
-                timeout: 610000
+            responseNode = addMessage("assistant", "正在处理", true);
+            if (voiceEnabled && voiceAvailable) {
+                speechStream = createSpeechStream(responseNode, operationId);
+            } else if (voiceEnabled) {
+                showToast(voiceUnavailableReason, "error");
+            }
+
+            var data = await requestChatResponse(message, function (event) {
+                if (event.type === "start") {
+                    interactionId = event.interaction_id;
+                    return;
+                }
+                if (event.type === "reset") {
+                    fullResponse = "";
+                    if (speechStream) {
+                        speechStream.cancel(false);
+                        speechStream = voiceEnabled && voiceAvailable
+                            ? createSpeechStream(responseNode, operationId)
+                            : null;
+                    }
+                    resetResponseText(responseNode);
+                    return;
+                }
+                if (event.type !== "delta") {
+                    return;
+                }
+                var text = String(event.text || "");
+                var firstDelta = fullResponse.length === 0;
+                fullResponse += text;
+                if (firstDelta) {
+                    machine.set("speaking", { operationId: operationId });
+                }
+                if (!speechStream || !speechStream.push(text)) {
+                    appendResponseText(responseNode, text);
+                }
             });
-            pending.remove();
-            var responseNode = addMessage(
-                "assistant", "", false, data.interaction_id, null
-            );
-            machine.set("speaking", { operationId: operationId });
-            await typeResponse(responseNode, data.response, operationId);
-            if (voiceEnabled) {
-                speakResponse(data.response, operationId).then(function () {
-                    machine.complete(operationId);
-                });
-            } else {
+
+            interactionId = data.interaction_id || interactionId;
+            var canonicalResponse = String(data.response || fullResponse);
+            if (!speechStream) {
+                responseNode.classList.remove("pending");
+                responseNode.querySelector(".message-body").textContent = canonicalResponse;
+            }
+
+            function completeResponse() {
+                if (responseNode.isConnected && interactionId) {
+                    addFeedbackControls(responseNode, interactionId, null);
+                }
                 machine.complete(operationId);
+            }
+
+            if (speechStream) {
+                speechStream.finish().then(completeResponse);
+            } else {
+                completeResponse();
             }
             loadStatus().catch(function () {});
         } catch (error) {
-            if (pending) {
-                pending.remove();
+            if (speechStream) {
+                speechStream.cancel(false);
+            }
+            if (responseNode) {
+                responseNode.remove();
                 addMessage("assistant", error.message || "请求失败", false);
             }
             machine.fail(operationId);
-            showToast(error.message, "error");
+            showToast(error.message || "请求失败", "error");
             if (error.code === "invalid_session") {
                 window.localStorage.removeItem("jarvis.sessionId");
                 sessionId = "";
